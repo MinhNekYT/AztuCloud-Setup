@@ -33,7 +33,7 @@ def out(msg):
     log(msg)
 
 
-def run(cmd, silent=False, input_data=None, fatal=True):
+def run(cmd, silent=True, input_data=None, fatal=True):
     try:
         if not silent:
             out(f">>> {cmd}")
@@ -162,13 +162,26 @@ def create_user():
             f"useradd -m -s /bin/bash {USER}"
         )
 
+        # Leaving this blank is allowed: instead of setting a password,
+        # we clear it with `passwd -d`, so the account has no password
+        # at all. Login/su still works password-free; sudo is already
+        # NOPASSWD via grant_root_access() below, so this only matters
+        # for direct console/VNC login prompts.
         passwd = getpass.getpass(
-            "Password: "
+            "Password (để trống = không mật khẩu): "
         )
 
-        run(
-            f"echo '{USER}:{passwd}' | chpasswd"
-        )
+        if passwd == "":
+            out(
+                f"[USER] Không đặt mật khẩu cho {USER} — tài khoản sẽ đăng nhập không cần mật khẩu"
+            )
+            run(
+                f"passwd -d {USER}"
+            )
+        else:
+            run(
+                f"echo '{USER}:{passwd}' | chpasswd"
+            )
 
 
     run(
@@ -279,22 +292,36 @@ def setup_vnc():
     # tty) and pipe it into `vncpasswd -f`, which reads plaintext from
     # stdin and writes the obfuscated password file to stdout instead
     # of prompting.
+    #
+    # Leaving this blank is allowed: it skips vncpasswd entirely and
+    # starts the server with "-SecurityTypes None" below, so anyone who
+    # can reach the port connects without a password. Only do this on
+    # a network you already trust (e.g. behind the Cloudflare tunnel
+    # only, or a private VPS you control).
     vnc_password = getpass.getpass(
-        "VNC password (min 6 chars): "
+        "VNC password (min 6 chars, để trống = không mật khẩu): "
     )
 
-    run(
-        f"su - {USER} -c 'vncpasswd -f > {vnc_dir}/passwd'",
-        input_data=vnc_password + "\n"
-    )
+    global VNC_NO_AUTH
+    VNC_NO_AUTH = vnc_password == ""
 
-    run(
-        f"chmod 600 {vnc_dir}/passwd"
-    )
+    if VNC_NO_AUTH:
+        out(
+            "[VNC] Không đặt mật khẩu — VNC sẽ chạy ở chế độ không xác thực"
+        )
+    else:
+        run(
+            f"su - {USER} -c 'vncpasswd -f > {vnc_dir}/passwd'",
+            input_data=vnc_password + "\n"
+        )
 
-    run(
-        f"chown {USER}:{USER} {vnc_dir}/passwd"
-    )
+        run(
+            f"chmod 600 {vnc_dir}/passwd"
+        )
+
+        run(
+            f"chown {USER}:{USER} {vnc_dir}/passwd"
+        )
 
 
     # Two fixes here, both needed for KDE Plasma to survive on TigerVNC:
@@ -350,11 +377,17 @@ exec dbus-launch --exit-with-session startplasma-x11
     # overrides the xstartup file we just wrote above. Leaving -xstartup
     # out lets vncserver fall back to the default xstartup file, which
     # already runs startplasma-x11 correctly.
+    #
+    # -SecurityTypes None is only added when no password was set above;
+    # otherwise vncserver picks up the passwd file on its own.
+    security_flag = "-SecurityTypes None " if VNC_NO_AUTH else ""
+
     run(
         f"""
 su - {USER} -c '
 vncserver :1 \
 -localhost no \
+{security_flag}\
 -geometry 1920x1080 \
 -depth 24
 '
