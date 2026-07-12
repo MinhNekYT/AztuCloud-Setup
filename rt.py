@@ -486,41 +486,86 @@ nohup cloudflared tunnel {tls_flag}\
 def setup_moonlight_web():
 
     out(
-        "[MOONLIGHT WEB] Installing"
+        "[MOONLIGHT WEB] Installing (optional, will skip on error)"
     )
 
-    package = f"{HOME}/moonlight-web-x86_64-unknown-linux-gnu.tar.gz"
+    archive = f"{HOME}/moonlight-web.tar.gz"
 
-
-    if not os.path.exists(package):
+    # The hardcoded "v2.10.0" tag used previously will silently 404 once
+    # a newer release replaces it, aborting the whole installer (run()
+    # is fatal by default). Resolve whatever the *latest* release's
+    # linux x86_64 tarball actually is via the GitHub API instead, the
+    # same pattern used for Heroic in install_heroic().
+    if not os.path.exists(archive):
 
         run(
             f"""
-su - {USER} -c '
-cd ~
-wget -q \
-https://github.com/MrCreativ3001/moonlight-web-stream/releases/download/v2.10.0/moonlight-web-x86_64-unknown-linux-gnu.tar.gz
-'
-"""
+DL_URL=$(curl -s https://api.github.com/repos/MrCreativ3001/moonlight-web-stream/releases/latest \
+| grep -oP '"browser_download_url":\\s*"\\K[^"]+x86_64-unknown-linux-gnu\\.tar\\.gz(?=")' \
+| head -n1)
+if [ -n "$DL_URL" ]; then
+    su - {USER} -c "wget -q '$DL_URL' -O {archive}"
+fi
+""",
+            fatal=False
         )
 
+    if not os.path.exists(archive) or os.path.getsize(archive) == 0:
+        out(
+            "[MOONLIGHT WEB] WARNING: could not resolve/download latest release — skipping Moonlight Web"
+        )
+        return
 
     run(
+        f"su - {USER} -c 'tar -xzf {archive} -C {HOME}'",
+        fatal=False
+    )
+
+    # Don't assume the archive extracts into a folder literally named
+    # "package" — that name isn't guaranteed to stay stable across
+    # releases. Instead, find wherever the web-server binary actually
+    # landed after extraction.
+    extract_dir = run(
+        f"dirname $(find {HOME} -maxdepth 3 -type f -name web-server | head -n1)",
+        fatal=False
+    )
+
+    if not extract_dir or not os.path.isdir(extract_dir):
+        out(
+            "[MOONLIGHT WEB] WARNING: web-server binary not found after extraction — skipping Moonlight Web"
+        )
+        return
+
+    run(
+        f"chown -R {USER}:{USER} {extract_dir}",
+        fatal=False
+    )
+
+    run(
+        f"chmod +x {extract_dir}/web-server {extract_dir}/streamer",
+        fatal=False
+    )
+
+    started = run(
         f"""
 su - {USER} -c '
-cd ~
-tar -xzf moonlight-web-x86_64-unknown-linux-gnu.tar.gz
-
-cd package
-
-chmod +x web-server streamer
-
+cd {extract_dir}
 nohup ./web-server \
 --bind-address 127.0.0.1:8081 \
-> ~/moonlight-web.log 2>&1 &
+> {HOME}/moonlight-web.log 2>&1 &
 '
-"""
+""",
+        fatal=False
     )
+
+    if started is None:
+        out(
+            "[MOONLIGHT WEB] WARNING: failed to start web-server — skipping Moonlight Web"
+        )
+    else:
+        out(
+            f"[MOONLIGHT WEB] Started from {extract_dir}"
+        )
 
 
 
@@ -700,6 +745,78 @@ cp {file} \
     # install.
     run(
         f"su - {USER} -c 'DISPLAY=:1 plasma-apply-wallpaperimage ~/.local/share/wallpapers/wallpaper.png'",
+        fatal=False
+    )
+
+
+
+def disable_screen_lock():
+
+    # By default KDE Plasma locks the session after a period of
+    # inactivity (kscreenlocker), which shows a password prompt over
+    # the VNC feed — the screen users were seeing. Since access to
+    # this desktop is already gated behind the VNC password (or lack
+    # thereof, by choice) and/or the Cloudflare tunnel, an additional
+    # OS-level lock screen just gets in the way for a cloud
+    # gaming/remote desktop box. This disables auto-lock entirely and
+    # unlocks the session immediately if it's already locked.
+
+    out(
+        "[LOCK] Disabling KDE screen lock (kscreenlocker)"
+    )
+
+    config_dir = f"{HOME}/.config"
+
+    run(
+        f"su - {USER} -c 'mkdir -p {config_dir}'",
+        fatal=False
+    )
+
+    kscreenlockerrc = f"{config_dir}/kscreenlockerrc"
+
+    Path(kscreenlockerrc).write_text(
+        "[Daemon]\n"
+        "Autolock=false\n"
+        "LockOnResume=false\n"
+        "LockGrace=0\n"
+        "Timeout=0\n"
+    )
+
+    run(
+        f"chown {USER}:{USER} {kscreenlockerrc}",
+        fatal=False
+    )
+
+    # Also stop power-management from triggering a lock on suspend/
+    # screen-off — Plasma's power profiles have their own independent
+    # "lock screen" toggle that isn't controlled by kscreenlockerrc.
+    for group in [
+        "AC/DimDisplay",
+        "AC/DPMSControl",
+        "Battery/DimDisplay",
+        "Battery/DPMSControl",
+    ]:
+        run(
+            f"su - {USER} -c "
+            f"\"kwriteconfig5 --file powermanagementprofilesrc "
+            f"--group {group} --key lockScreen false\"",
+            fatal=False
+        )
+
+    # If a lock screen is already active in the running session (e.g.
+    # this script is re-run after the first idle timeout already
+    # fired), ask kscreenlocker to unlock it right away instead of
+    # waiting for a password.
+    run(
+        f"su - {USER} -c 'DISPLAY=:1 qdbus org.kde.screensaver "
+        f"/ScreenSaver org.freedesktop.ScreenSaver.SetActive false'",
+        fatal=False
+    )
+
+    # Restart kscreenlocker_greet's daemon so the new config (loaded
+    # only at startup) takes effect without needing a fresh VNC login.
+    run(
+        f"su - {USER} -c 'DISPLAY=:1 kquitapp5 kscreenlocker_greet'",
         fatal=False
     )
 
@@ -1136,6 +1253,8 @@ def main():
 
 
     setup_wallpaper()
+
+    disable_screen_lock()
 
     urls = get_cloudflare_urls()
 
