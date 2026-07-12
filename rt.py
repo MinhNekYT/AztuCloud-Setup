@@ -332,9 +332,20 @@ def setup_vnc():
     #    never returns while the session is alive.
     # 2. `dbus-launch --exit-with-session` — Plasma needs a D-Bus
     #    session bus to start; without one it crashes within seconds.
+    # Disabling kscreenlocker (see disable_screen_lock()) only stops
+    # KDE's own password lock screen. The X server underneath still
+    # runs its own independent screensaver/DPMS blanking (xset), which
+    # is what actually produces the plain black noVNC feed after a
+    # period of inactivity — no KDE UI involved at all, so it isn't
+    # affected by kscreenlocker settings. These have to be turned off
+    # every session, so they go in xstartup itself (running before the
+    # `exec` below, while $DISPLAY is already set for this X session).
     startup = """#!/bin/bash
 unset SESSION_MANAGER
 unset DBUS_SESSION_BUS_ADDRESS
+xset s off
+xset s noblank
+xset -dpms
 exec dbus-launch --exit-with-session startplasma-x11
 """
 
@@ -392,6 +403,15 @@ vncserver :1 \
 -depth 24
 '
 """
+    )
+
+    # Apply immediately to this already-running session too — xstartup
+    # only runs once at session creation, so a machine that already
+    # went black under an earlier run of this script wouldn't pick up
+    # the fix above until its next full VNC restart otherwise.
+    run(
+        f"su - {USER} -c 'DISPLAY=:1 xset s off; DISPLAY=:1 xset s noblank; DISPLAY=:1 xset -dpms'",
+        fatal=False
     )
 
 
