@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # cloudgaming_installer.py
-# KDE + VNC + noVNC + Moonlight Web + Sunshine + Cloudflare + Monitor + Steam + Heroic
+# KDE + Xorg(dummy)+x11vnc + noVNC + Moonlight Web + Sunshine + Cloudflare + Monitor + Steam + Heroic
 
 import os
 import sys
@@ -233,7 +233,10 @@ def grant_root_access():
 def install_base():
 
     packages = [
-        "tigervnc-standalone-server",
+        "xserver-xorg-core",
+        "xserver-xorg-video-dummy",
+        "x11vnc",
+        "xauth",
         "kde-plasma-desktop",
         "plasma-workspace",
         "dbus-x11",
@@ -254,14 +257,21 @@ def install_base():
 def setup_vnc():
 
     out(
-        "[VNC] Setup KDE VNC"
+        "[DISPLAY] Setup KDE desktop on real Xorg (dummy driver) + x11vnc"
     )
 
-    # Earlier steps in this script write files into $HOME as root
-    # (Path.write_text, urlretrieve, etc). Make sure everything under
-    # $HOME is actually owned by the target user before VNC/X tools
-    # try to use it — several of the errors seen so far trace back to
-    # root-owned files sitting in the user's home directory.
+    # Root cause of "cursor shows but nothing moves it": TigerVNC's
+    # Xvnc is a headless, self-contained X server that only ever
+    # accepts input through its own RFB/VNC protocol — it never reads
+    # from the kernel input subsystem (/dev/input) at all. Sunshine
+    # injects mouse/keyboard by creating virtual uinput devices at the
+    # kernel level, which only get picked up by an X server that's
+    # actually watching /dev/input via libinput — which Xvnc simply
+    # isn't. Real Xorg (even with no physical GPU, via the "dummy"
+    # video driver) does watch /dev/input, so it sees Sunshine's
+    # uinput devices correctly. x11vnc then bridges that real Xorg
+    # session to VNC/noVNC exactly like Xvnc did, on the same port.
+
     run(
         f"chown -R {USER}:{USER} {HOME}",
         silent=True
@@ -269,35 +279,11 @@ def setup_vnc():
 
     vnc_dir = f"{HOME}/.config/tigervnc"
 
-    # Newer TigerVNC (>=1.13) stores its config in ~/.config/tigervnc
-    # instead of ~/.vnc, and auto-migrates ~/.vnc there the first time
-    # vncserver runs. That migration breaks if ~/.config doesn't exist
-    # yet (fresh user account) or if ~/.config/tigervnc already exists
-    # partially from an earlier failed run of this script. Fix: wipe
-    # any leftover state and write straight into the new location, so
-    # there's nothing left for vncserver to "migrate".
     run(
-        f"rm -rf {HOME}/.vnc {vnc_dir}",
-        silent=True
+        f"su - {USER} -c 'mkdir -p {vnc_dir}'",
+        fatal=False
     )
 
-    run(
-        f"su - {USER} -c 'mkdir -p {vnc_dir}'"
-    )
-
-    # Plain `vncpasswd` needs a real tty (it uses ioctl to disable echo
-    # while you type). That fails with "Inappropriate ioctl for device"
-    # when this script runs from a notebook/non-interactive shell.
-    # Fix: read the password ourselves with getpass (works without a
-    # tty) and pipe it into `vncpasswd -f`, which reads plaintext from
-    # stdin and writes the obfuscated password file to stdout instead
-    # of prompting.
-    #
-    # Leaving this blank is allowed: it skips vncpasswd entirely and
-    # starts the server with "-SecurityTypes None" below, so anyone who
-    # can reach the port connects without a password. Only do this on
-    # a network you already trust (e.g. behind the Cloudflare tunnel
-    # only, or a private VPS you control).
     vnc_password = getpass.getpass(
         "VNC password (min 6 chars, để trống = không mật khẩu): "
     )
@@ -310,6 +296,8 @@ def setup_vnc():
             "[VNC] Không đặt mật khẩu — VNC sẽ chạy ở chế độ không xác thực"
         )
     else:
+        # x11vnc accepts the same obfuscated password format vncpasswd
+        # produces, so this file is reused as-is for -rfbauth below.
         run(
             f"su - {USER} -c 'vncpasswd -f > {vnc_dir}/passwd'",
             input_data=vnc_password + "\n"
@@ -323,34 +311,136 @@ def setup_vnc():
             f"chown {USER}:{USER} {vnc_dir}/passwd"
         )
 
+    # --- Dummy Xorg config -------------------------------------------------
+    xorg_conf = "/etc/X11/xorg-dummy.conf"
 
-    # Two fixes here, both needed for KDE Plasma to survive on TigerVNC:
-    # 1. `exec` instead of `startplasma-x11 &` — backgrounding makes
-    #    the xstartup script itself return immediately, which
-    #    vncserver treats as "session exited too early" and kills it.
-    #    `exec` replaces the shell process with Plasma so the script
-    #    never returns while the session is alive.
-    # 2. `dbus-launch --exit-with-session` — Plasma needs a D-Bus
-    #    session bus to start; without one it crashes within seconds.
-    # Disabling kscreenlocker (see disable_screen_lock()) only stops
-    # KDE's own password lock screen. The X server underneath still
-    # runs its own independent screensaver/DPMS blanking (xset), which
-    # is what actually produces the plain black noVNC feed after a
-    # period of inactivity — no KDE UI involved at all, so it isn't
-    # affected by kscreenlocker settings. These have to be turned off
-    # every session, so they go in xstartup itself (running before the
-    # `exec` below, while $DISPLAY is already set for this X session).
-    # Xvnc has no real GPU behind it. KWin's default compositor tries
-    # OpenGL first, fails silently against a virtual framebuffer, and
-    # the session is left rendering nothing — a plain black screen
-    # that looks identical to the DPMS blanking issue above but has a
-    # different cause and needs a different fix. Forcing software
-    # rendering (llvmpipe via LIBGL_ALWAYS_SOFTWARE) and telling Qt/KWin
-    # not to attempt GL integration makes compositing fall back to a
-    # path that actually works without a GPU.
-    startup = """#!/bin/bash
-unset SESSION_MANAGER
-unset DBUS_SESSION_BUS_ADDRESS
+    Path(xorg_conf).write_text(
+        'Section "Device"\n'
+        '    Identifier "DummyDevice"\n'
+        '    Driver "dummy"\n'
+        '    VideoRam 256000\n'
+        'EndSection\n'
+        '\n'
+        'Section "Monitor"\n'
+        '    Identifier "DummyMonitor"\n'
+        '    HorizSync 5.0 - 1000.0\n'
+        '    VertRefresh 5.0 - 200.0\n'
+        '    Modeline "1920x1080" 173.00 1920 2048 2248 2576 '
+        '1080 1083 1088 1120 -hsync +vsync\n'
+        'EndSection\n'
+        '\n'
+        'Section "Screen"\n'
+        '    Identifier "DummyScreen"\n'
+        '    Device "DummyDevice"\n'
+        '    Monitor "DummyMonitor"\n'
+        '    DefaultDepth 24\n'
+        '    SubSection "Display"\n'
+        '        Depth 24\n'
+        '        Modes "1920x1080"\n'
+        '    EndSubSection\n'
+        'EndSection\n'
+        '\n'
+        'Section "ServerLayout"\n'
+        '    Identifier "DummyLayout"\n'
+        '    Screen "DummyScreen"\n'
+        'EndSection\n'
+        '\n'
+        'Section "ServerFlags"\n'
+        '    Option "AutoAddDevices" "on"\n'
+        '    Option "AutoEnableDevices" "on"\n'
+        '    Option "DontVTSwitch" "on"\n'
+        '    Option "AllowMouseOpenFail" "on"\n'
+        '    Option "PciForceNone" "on"\n'
+        'EndSection\n'
+    )
+
+    xauth_file = f"{HOME}/.Xauthority"
+
+    run(
+        f"su - {USER} -c 'touch ~/.Xauthority'"
+    )
+
+    run(
+        f"chown {USER}:{USER} {xauth_file}"
+    )
+
+    run(
+        f"chmod 600 {xauth_file}"
+    )
+
+    cookie = run(
+        "mcookie",
+        fatal=False
+    ) or ""
+
+    if cookie:
+        run(
+            f"su - {USER} -c 'xauth -f {xauth_file} add :1 . {cookie}'",
+            fatal=False
+        )
+
+    # Kill anything left over from a previous run of this script
+    # (stuck black screen, broken input, etc.) so the fixes below
+    # actually take effect instead of leaving the old session alone.
+    run("pkill -x Xorg", fatal=False)
+    run("pkill -x x11vnc", fatal=False)
+    run(f"pkill -u {USER} -x startplasma-x11", fatal=False)
+    time.sleep(1)
+
+    out(
+        "[DISPLAY] Starting Xorg :1 (dummy driver)"
+    )
+
+    run(
+        f"nohup Xorg :1 -config {xorg_conf} -auth {xauth_file} "
+        f"-noreset -novtswitch -sharevts "
+        f"> {HOME}/xorg.log 2>&1 &",
+        fatal=False
+    )
+
+    time.sleep(3)
+
+    out(
+        "[DISPLAY] Starting x11vnc bridge (VNC on :5901)"
+    )
+
+    if VNC_NO_AUTH:
+        auth_flag = "-nopw"
+    else:
+        auth_flag = f"-rfbauth {vnc_dir}/passwd"
+
+    run(
+        f"""
+su - {USER} -c '
+export DISPLAY=:1
+export XAUTHORITY={xauth_file}
+nohup x11vnc -display :1 -auth {xauth_file} \
+-forever -shared -rfbport 5901 {auth_flag} \
+> ~/x11vnc.log 2>&1 &
+'
+""",
+        fatal=False
+    )
+
+    out(
+        "[DISPLAY] Starting KDE Plasma on :1"
+    )
+
+    # Xvnc has no real GPU behind it and neither does this dummy Xorg
+    # driver. KWin's default compositor tries OpenGL first, fails
+    # silently against a virtual framebuffer, and the session is left
+    # rendering nothing — a plain black screen. Forcing software
+    # rendering (llvmpipe via LIBGL_ALWAYS_SOFTWARE) and telling
+    # Qt/KWin not to attempt GL integration makes compositing fall
+    # back to a path that actually works without a GPU. The X server
+    # also runs its own independent screensaver/DPMS blanking
+    # regardless of KDE's own lock screen settings (see
+    # disable_screen_lock()), so that's turned off here too.
+    run(
+        f"""
+su - {USER} -c '
+export DISPLAY=:1
+export XAUTHORITY={xauth_file}
 export LIBGL_ALWAYS_SOFTWARE=1
 export QT_XCB_GL_INTEGRATION=none
 export QT_QUICK_BACKEND=software
@@ -358,82 +448,10 @@ export KWIN_COMPOSE=Q
 xset s off
 xset s noblank
 xset -dpms
-exec dbus-launch --exit-with-session startplasma-x11
-"""
-
-
-    xstartup_path = f"{vnc_dir}/xstartup"
-
-    Path(xstartup_path).write_text(startup)
-
-    run(
-        f"chown {USER}:{USER} {xstartup_path}"
-    )
-
-    run(
-        f"chmod +x {xstartup_path}"
-    )
-
-    # TigerVNC's vncserver wrapper calls `xauth` to set up X11 auth
-    # before it can start Xvnc. When this runs via `su - USER -c` from
-    # a root/notebook process, xauth sometimes can't create
-    # ~/.Xauthority itself (often because earlier root-owned writes
-    # into $HOME left it in a state xauth doesn't like), which makes
-    # the whole session exit within seconds. Pre-creating the file
-    # with the right owner sidesteps that entirely.
-    run(
-        f"su - {USER} -c 'touch ~/.Xauthority'"
-    )
-
-    run(
-        f"chown {USER}:{USER} {HOME}/.Xauthority"
-    )
-
-    run(
-        f"chmod 600 {HOME}/.Xauthority"
-    )
-
-
-    # NOTE: do NOT pass "-xstartup startplasma-x11" here.
-    # vncserver's -xstartup flag expects a *path to a script*, not a
-    # command name. Passing a bare command breaks startup and silently
-    # overrides the xstartup file we just wrote above. Leaving -xstartup
-    # out lets vncserver fall back to the default xstartup file, which
-    # already runs startplasma-x11 correctly.
-    #
-    # -SecurityTypes None is only added when no password was set above;
-    # otherwise vncserver picks up the passwd file on its own.
-    # If this script is being re-run on a machine that's already
-    # stuck (e.g. black screen from an earlier run), a fresh
-    # "vncserver :1" below would normally refuse to start since :1 is
-    # already in use — silently leaving the old, broken session (and
-    # its stale xstartup) running untouched. Killing it first
-    # guarantees the fixes above actually take effect.
-    run(
-        f"su - {USER} -c 'vncserver -kill :1'",
-        fatal=False
-    )
-
-    security_flag = "-SecurityTypes None " if VNC_NO_AUTH else ""
-
-    run(
-        f"""
-su - {USER} -c '
-vncserver :1 \
--localhost no \
-{security_flag}\
--geometry 1920x1080 \
--depth 24
+nohup dbus-launch --exit-with-session startplasma-x11 \
+> ~/plasma.log 2>&1 &
 '
-"""
-    )
-
-    # Apply immediately to this already-running session too — xstartup
-    # only runs once at session creation, so a machine that already
-    # went black under an earlier run of this script wouldn't pick up
-    # the fix above until its next full VNC restart otherwise.
-    run(
-        f"su - {USER} -c 'DISPLAY=:1 xset s off; DISPLAY=:1 xset s noblank; DISPLAY=:1 xset -dpms'",
+""",
         fatal=False
     )
 
@@ -1010,8 +1028,8 @@ apps={
 "steam":"Steam",
 "chromium":"Chromium",
 "sunshine":"Sunshine",
-"Xorg":"X11",
-"Xtigervnc":"TigerVNC",
+"Xorg":"X11 (Xorg dummy)",
+"x11vnc":"x11vnc",
 "web-server":"Moonlight",
 "heroic":"Heroic"
 }
@@ -1297,7 +1315,7 @@ def final_report(urls):
 Services:
 
 [OK] KDE Plasma
-[OK] TigerVNC
+[OK] Xorg (dummy) + x11vnc
 [OK] noVNC
 [OK] Moonlight Web
 [OK] Sunshine
