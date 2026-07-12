@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # cloudgaming_installer.py
-# KDE + VNC + noVNC + Moonlight Web + Sunshine + Cloudflare + Monitor
+# KDE/XFCE + VNC + noVNC + Moonlight Web + Sunshine + Cloudflare + Monitor
 
 import os
 import sys
@@ -17,6 +17,11 @@ from datetime import datetime
 
 
 LOG_FILE = "/var/log/cloudgaming.log"
+
+# Set by choose_ui() before anything else installs. "kde" = full KDE
+# Plasma desktop, "xfce" = lightweight XFCE (much lower RAM/CPU
+# footprint, better for small/cheap VPS boxes).
+UI = "kde"
 
 
 def log(msg):
@@ -156,6 +161,38 @@ def record_system_info():
         run(cmd, silent=True, fatal=False)
 
 
+def choose_ui():
+
+    global UI
+
+    out(
+        "\n=============================="
+    )
+
+    out(
+        "CHOOSE DESKTOP UI"
+    )
+
+    out(
+        "=============================="
+    )
+
+    print("""
+  1) KDE Plasma  - full-featured, heavier (more RAM/CPU)
+  2) XFCE Lite   - lightweight, faster over VNC on small/cheap boxes
+""")
+
+    choice = input(
+        "Chọn UI [1-2] (mặc định 1 = KDE): "
+    ).strip()
+
+    UI = "xfce" if choice == "2" else "kde"
+
+    out(
+        f"[UI] Selected: {'XFCE Lite' if UI == 'xfce' else 'KDE Plasma'}"
+    )
+
+
 def check_region():
 
     out("[CHECK] Region")
@@ -265,8 +302,6 @@ def install_base():
 
     packages = [
         "tigervnc-standalone-server",
-        "kde-plasma-desktop",
-        "plasma-workspace",
         "dbus-x11",
         "curl",
         "wget",
@@ -276,6 +311,29 @@ def install_base():
         "python3-psutil",
         "psmisc"
     ]
+
+    if UI == "xfce":
+
+        out(
+            "[UI] Installing XFCE Lite (xfce4 + xfce4-goodies)"
+        )
+
+        packages += [
+            "xfce4",
+            "xfce4-goodies",
+            "xfce4-terminal",
+        ]
+
+    else:
+
+        out(
+            "[UI] Installing KDE Plasma"
+        )
+
+        packages += [
+            "kde-plasma-desktop",
+            "plasma-workspace",
+        ]
 
     for p in packages:
         install_package(p)
@@ -448,27 +506,31 @@ def setup_vnc():
     )
 
 
-    # Two fixes here, both needed for KDE Plasma to survive on TigerVNC:
-    # 1. `exec` instead of `startplasma-x11 &` — backgrounding makes
-    #    the xstartup script itself return immediately, which
-    #    vncserver treats as "session exited too early" and kills it.
-    #    `exec` replaces the shell process with Plasma so the script
-    #    never returns while the session is alive.
-    # 2. `dbus-launch --exit-with-session` — Plasma needs a D-Bus
-    #    session bus to start; without one it crashes within seconds.
+    # Two fixes here, both needed for the desktop session to survive on
+    # TigerVNC, whichever UI was chosen:
+    # 1. `exec` instead of `<session> &` — backgrounding makes the
+    #    xstartup script itself return immediately, which vncserver
+    #    treats as "session exited too early" and kills it. `exec`
+    #    replaces the shell process with the desktop session so the
+    #    script never returns while the session is alive.
+    # 2. `dbus-launch --exit-with-session` — both KDE Plasma and XFCE
+    #    need a D-Bus session bus to start; without one they crash
+    #    within seconds.
     # 3. `xset s off/-dpms/s noblank` — fixes the classic "blackscreen
     #    but the machine is still working" bug on TigerVNC: X11's own
     #    screensaver/blanking still fires on a VNC display even though
     #    there's no real monitor to blank, and it paints the captured
     #    framebuffer black. Disabling blanking/DPMS/screensaver at the
     #    X server level up front stops that from ever kicking in.
-    startup = """#!/bin/bash
+    session_cmd = "startxfce4" if UI == "xfce" else "startplasma-x11"
+
+    startup = f"""#!/bin/bash
 unset SESSION_MANAGER
 unset DBUS_SESSION_BUS_ADDRESS
 xset s off
 xset s noblank
 xset -dpms
-exec dbus-launch --exit-with-session startplasma-x11
+exec dbus-launch --exit-with-session {session_cmd}
 """
 
 
@@ -504,12 +566,12 @@ exec dbus-launch --exit-with-session startplasma-x11
     )
 
 
-    # NOTE: do NOT pass "-xstartup startplasma-x11" here.
+    # NOTE: do NOT pass "-xstartup <session command>" here.
     # vncserver's -xstartup flag expects a *path to a script*, not a
     # command name. Passing a bare command breaks startup and silently
     # overrides the xstartup file we just wrote above. Leaving -xstartup
     # out lets vncserver fall back to the default xstartup file, which
-    # already runs startplasma-x11 correctly.
+    # already runs the chosen desktop session correctly.
     run(
         f"""
 su - {USER} -c '
@@ -538,6 +600,14 @@ vncserver :1 \
 
 
 def disable_screen_lock():
+
+    if UI == "xfce":
+        disable_screen_lock_xfce()
+    else:
+        disable_screen_lock_kde()
+
+
+def disable_screen_lock_kde():
 
     out(
         "[LOCKSCREEN] Disabling KDE screen lock + power blanking "
@@ -582,6 +652,45 @@ def disable_screen_lock():
                 silent=True,
                 fatal=False
             )
+
+
+def disable_screen_lock_xfce():
+
+    out(
+        "[LOCKSCREEN] Disabling XFCE screen lock + power blanking "
+        "(so an idle VNC session never shows the lock screen or goes black)"
+    )
+
+    # XFCE's screensaver/lock and power management live in xfconf, set
+    # via xfconf-query instead of KDE's kwriteconfig. xfce4-screensaver
+    # (or light-locker, depending on what's installed) is what shows
+    # the lock dialog; xfce4-power-manager is what blanks/suspends.
+    settings = [
+        ("xfce4-screensaver", "/saver/enabled", "false", "bool"),
+        ("xfce4-screensaver", "/lock/enabled", "false", "bool"),
+        ("xfce4-power-manager", "/xfce4-power-manager/dpms-enabled", "false", "bool"),
+        ("xfce4-power-manager", "/xfce4-power-manager/blank-on-ac", "0", "int"),
+        ("xfce4-power-manager", "/xfce4-power-manager/dpms-on-ac-sleep", "0", "int"),
+        ("xfce4-power-manager", "/xfce4-power-manager/dpms-on-ac-off", "0", "int"),
+        ("xfce4-power-manager", "/xfce4-power-manager/inactivity-on-ac", "0", "int"),
+    ]
+
+    for channel, prop, value, vtype in settings:
+
+        run(
+            f"su - {USER} -c \"DISPLAY=:1 xfconf-query -c {channel} -p {prop} "
+            f"--create -t {vtype} -s {value}\"",
+            silent=True,
+            fatal=False
+        )
+
+    # Also disable light-locker if it's the one installed instead of
+    # xfce4-screensaver -- easiest to just make sure it's not running.
+    run(
+        f"su - {USER} -c 'killall light-locker'",
+        silent=True,
+        fatal=False
+    )
 
 
 
@@ -821,18 +930,28 @@ cp {file} \
     )
 
     # Applying the wallpaper live requires talking to the already
-    # running Plasma session over D-Bus/X11. This is a fresh shell
+    # running desktop session over D-Bus/X11. This is a fresh shell
     # (separate from the VNC session's environment), so it doesn't
     # automatically know DISPLAY or the right D-Bus session bus —
     # setting DISPLAY=:1 covers the common case, but this can still
     # fail depending on timing. It's purely cosmetic (the file is
-    # already copied in place above and can be set manually from
-    # System Settings), so a failure here shouldn't abort the whole
-    # install.
-    run(
-        f"su - {USER} -c 'DISPLAY=:1 plasma-apply-wallpaperimage ~/.local/share/wallpapers/wallpaper.png'",
-        fatal=False
-    )
+    # already copied in place above and can be set manually later),
+    # so a failure here shouldn't abort the whole install.
+    if UI == "xfce":
+
+        run(
+            f"su - {USER} -c \"DISPLAY=:1 xfconf-query -c xfce4-desktop "
+            f"-p /backdrop/screen0/monitor0/workspace0/last-image "
+            f"--create -t string -s {HOME}/.local/share/wallpapers/wallpaper.png\"",
+            fatal=False
+        )
+
+    else:
+
+        run(
+            f"su - {USER} -c 'DISPLAY=:1 plasma-apply-wallpaperimage ~/.local/share/wallpapers/wallpaper.png'",
+            fatal=False
+        )
 
 
 
@@ -1134,7 +1253,9 @@ curl -u admin:admin \
 
 def final_report(urls):
 
-    print("""
+    ui_label = "XFCE Lite" if UI == "xfce" else "KDE Plasma"
+
+    print(f"""
 
 ========================================
 
@@ -1144,7 +1265,7 @@ def final_report(urls):
 
 Services:
 
-[OK] KDE Plasma
+[OK] Desktop UI ({ui_label})
 [OK] TigerVNC
 [OK] noVNC
 [OK] Moonlight Web
@@ -1186,7 +1307,7 @@ Services:
                            logs below taken right after each service
                            started)
 
-  VNC / Plasma session     ~/.vnc/*:1.log
+  VNC / Desktop session    ~/.vnc/*:1.log
                            ~/.config/tigervnc/*:1.log
 
   noVNC                    ~/novnc.log
@@ -1232,6 +1353,8 @@ def main():
     check_root()
 
     record_system_info()
+
+    choose_ui()
 
     check_region()
 
