@@ -340,9 +340,21 @@ def setup_vnc():
     # affected by kscreenlocker settings. These have to be turned off
     # every session, so they go in xstartup itself (running before the
     # `exec` below, while $DISPLAY is already set for this X session).
+    # Xvnc has no real GPU behind it. KWin's default compositor tries
+    # OpenGL first, fails silently against a virtual framebuffer, and
+    # the session is left rendering nothing — a plain black screen
+    # that looks identical to the DPMS blanking issue above but has a
+    # different cause and needs a different fix. Forcing software
+    # rendering (llvmpipe via LIBGL_ALWAYS_SOFTWARE) and telling Qt/KWin
+    # not to attempt GL integration makes compositing fall back to a
+    # path that actually works without a GPU.
     startup = """#!/bin/bash
 unset SESSION_MANAGER
 unset DBUS_SESSION_BUS_ADDRESS
+export LIBGL_ALWAYS_SOFTWARE=1
+export QT_XCB_GL_INTEGRATION=none
+export QT_QUICK_BACKEND=software
+export KWIN_COMPOSE=Q
 xset s off
 xset s noblank
 xset -dpms
@@ -391,6 +403,17 @@ exec dbus-launch --exit-with-session startplasma-x11
     #
     # -SecurityTypes None is only added when no password was set above;
     # otherwise vncserver picks up the passwd file on its own.
+    # If this script is being re-run on a machine that's already
+    # stuck (e.g. black screen from an earlier run), a fresh
+    # "vncserver :1" below would normally refuse to start since :1 is
+    # already in use — silently leaving the old, broken session (and
+    # its stale xstartup) running untouched. Killing it first
+    # guarantees the fixes above actually take effect.
+    run(
+        f"su - {USER} -c 'vncserver -kill :1'",
+        fatal=False
+    )
+
     security_flag = "-SecurityTypes None " if VNC_NO_AUTH else ""
 
     run(
@@ -589,6 +612,76 @@ nohup ./web-server \
 
 
 
+def setup_sunshine_input():
+
+    # Sunshine injects mouse/keyboard/gamepad events on Linux by
+    # creating virtual devices through /dev/uinput. Without this
+    # setup, opening that device fails silently from Sunshine's
+    # perspective (video still streams fine — capture and input are
+    # independent pipelines) and every click/keypress the client sends
+    # simply goes nowhere, which is exactly "stream works, no cursor,
+    # can't interact".
+
+    out(
+        "[SUNSHINE] Enabling input injection (/dev/uinput)"
+    )
+
+    # Ensure the uinput kernel module is loaded now...
+    run(
+        "modprobe uinput",
+        fatal=False
+    )
+
+    # ...and stays loaded on every future boot, not just this run.
+    run(
+        "echo uinput > /etc/modules-load.d/uinput.conf",
+        fatal=False
+    )
+
+    # Group-based permission (rather than the logind "uaccess" tag)
+    # because a VNC desktop typically isn't a proper systemd-logind
+    # seat session, so ACL-based device tags often don't apply to it.
+    udev_rule = "/etc/udev/rules.d/60-sunshine-input.rules"
+
+    Path(udev_rule).write_text(
+        'KERNEL=="uinput", SUBSYSTEM=="misc", '
+        'MODE="0660", GROUP="input", '
+        'OPTIONS+="static_node=uinput"\n'
+    )
+
+    run(
+        "groupadd -f input",
+        fatal=False
+    )
+
+    run(
+        f"usermod -aG input {USER}",
+        fatal=False
+    )
+
+    run(
+        "udevadm control --reload-rules",
+        fatal=False
+    )
+
+    run(
+        "udevadm trigger --name-match=uinput",
+        fatal=False
+    )
+
+    # In case the device node already existed with stale permissions
+    # from before the udev rule was in place.
+    run(
+        "chgrp input /dev/uinput",
+        fatal=False
+    )
+
+    run(
+        "chmod 660 /dev/uinput",
+        fatal=False
+    )
+
+
 def setup_sunshine():
 
     out(
@@ -615,6 +708,8 @@ https://github.com/LizardByte/Sunshine/releases/download/v2026.516.143833/sunshi
         silent=True
     )
 
+
+    setup_sunshine_input()
 
     out(
         "[SUNSHINE] Configuring capture for headless Xvnc display"
@@ -661,6 +756,14 @@ https://github.com/LizardByte/Sunshine/releases/download/v2026.516.143833/sunshi
         "[SUNSHINE] Starting"
     )
 
+    # Restart cleanly if a previous run already has it running — a
+    # stale process would keep the old (pre-input-group,
+    # pre-capture-fix) session alive instead of picking up the fixes
+    # above.
+    run(
+        "pkill -u " + USER + " -x sunshine",
+        fatal=False
+    )
 
     run(
         f"""
