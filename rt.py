@@ -10,6 +10,7 @@ import traceback
 import subprocess
 import shutil
 import getpass
+import secrets
 import platform
 import urllib.request
 from pathlib import Path
@@ -26,6 +27,12 @@ HOME = "/root"
 # Plasma desktop, "xfce" = lightweight XFCE (much lower RAM/CPU
 # footprint, better for small/cheap VPS boxes).
 UI = "kde"
+
+# Set by setup_vnc() when it has to fall back to auto-generating the VNC
+# password (no usable tty to prompt on) instead of an interactive answer,
+# so final_report() can print it back to the user -- otherwise they'd have
+# no way to know what it is.
+VNC_PASSWORD_GENERATED = None
 
 
 def log(msg):
@@ -414,9 +421,48 @@ def setup_vnc():
     # tty) and pipe it into `vncpasswd -f`, which reads plaintext from
     # stdin and writes the obfuscated password file to stdout instead
     # of prompting.
-    vnc_password = getpass.getpass(
-        "VNC password (min 6 chars): "
-    )
+    #
+    # Further fix: some launch methods (e.g. `exec(urlopen(...).read())`
+    # inside a notebook cell) have *no* controlling tty and no readable
+    # stdin at all, so even getpass's own fallback path raises (its
+    # attempt to open /dev/tty errors with "Inappropriate ioctl for
+    # device", or a wrapping notebook runtime raises its own error first).
+    # In that situation there is no way to prompt interactively, so:
+    #   1. Allow the password to be supplied non-interactively via the
+    #      VNC_PASSWORD environment variable.
+    #   2. Otherwise try the interactive prompt.
+    #   3. If that also fails for any reason, auto-generate a random
+    #      password instead of crashing, and print it in the final
+    #      report so the user can still log in.
+    global VNC_PASSWORD_GENERATED
+
+    vnc_password = os.environ.get("VNC_PASSWORD", "").strip()
+
+    if not vnc_password:
+
+        try:
+
+            vnc_password = getpass.getpass(
+                "VNC password (min 6 chars): "
+            )
+
+        except Exception as e:
+
+            vnc_password = secrets.token_urlsafe(9)
+
+            VNC_PASSWORD_GENERATED = vnc_password
+
+            out(
+                "[VNC] No interactive terminal available "
+                f"({e}) -- auto-generated a VNC password instead. "
+                "It will be printed in the final summary."
+            )
+
+    if not vnc_password:
+
+        vnc_password = secrets.token_urlsafe(9)
+
+        VNC_PASSWORD_GENERATED = vnc_password
 
     run(
         f"vncpasswd -f > {vnc_dir}/passwd",
@@ -1141,6 +1187,22 @@ curl -u admin:admin \
 def final_report(urls):
 
     ui_label = "XFCE Lite" if UI == "xfce" else "KDE Plasma"
+
+    if VNC_PASSWORD_GENERATED:
+
+        print(f"""
+
+========================================
+
+ VNC PASSWORD (auto-generated -- no
+ interactive prompt was available)
+
+========================================
+
+  {VNC_PASSWORD_GENERATED}
+
+Save this now -- it is not stored anywhere in plaintext.
+""")
 
     print(f"""
 
