@@ -1667,7 +1667,81 @@ def print_update_banner():
     )
 
 
+def run_full_diagnostics():
+
+    # One-shot diagnostic dump: gathers everything needed to debug
+    # "VNC không connect được" and "Moonlight Web không nhận input"
+    # in a single run, so there's no need to SSH in and manually
+    # tail/grep half a dozen files. Safe to run repeatedly and does
+    # not touch/restart any running service.
+
+    out("========================================")
+    out(" CLOUD GAMING DIAGNOSTICS")
+    out("========================================\n")
+
+    user = input(
+        "Linux username đã dùng khi cài đặt: "
+    ).strip()
+
+    home = f"/home/{user}"
+
+    out(f"\n[INFO] USER={user} HOME={home}\n")
+
+    out("---- 1) Virtualization / uinput (Sunshine + Moonlight input) ----")
+    virt = run("systemd-detect-virt 2>/dev/null || echo unknown", fatal=False) or "unknown"
+    out(f"Virtualization: {virt}")
+    out(run("ls -l /dev/uinput 2>&1 || echo '/dev/uinput KHONG TON TAI'", fatal=False) or "")
+    out(run(f"id -nG {user} 2>&1", fatal=False) or "")
+    out(run("lsmod | grep -i uinput || echo 'module uinput KHONG duoc load'", fatal=False) or "")
+
+    out("\n---- 2) Processes (Xorg / x11vnc / noVNC / Sunshine / moonlight-web / cloudflared) ----")
+    out(run("ps aux | grep -E 'Xorg|x11vnc|novnc_proxy|websockify|sunshine|web-server|cloudflared' | grep -v grep", fatal=False) or "(khong thay process nao dang chay)")
+
+    out("\n---- 3) Listening ports (5901=x11vnc, 6001=noVNC, 8081=moonlight-web, 47990=sunshine) ----")
+    out(run("ss -ltnp 2>/dev/null | grep -E ':5901|:6001|:8081|:47990' || echo '(khong co port nao dang listen trong 4 port tren)'", fatal=False) or "")
+
+    out("\n---- 4) Xorg log (~/xorg.log) — tail 25 ----")
+    out(run(f"tail -n 25 {home}/xorg.log 2>&1", fatal=False) or "(khong tim thay file)")
+
+    out("\n---- 5) x11vnc log (~/x11vnc.log) — tail 25 ----")
+    out(run(f"tail -n 25 {home}/x11vnc.log 2>&1", fatal=False) or "(khong tim thay file)")
+
+    out("\n---- 6) noVNC log (~/novnc.log) — tail 25 ----")
+    out(run(f"tail -n 25 {home}/novnc.log 2>&1", fatal=False) or "(khong tim thay file)")
+
+    out("\n---- 7) Moonlight Web log (~/moonlight-web.log) — tail 25 ----")
+    out(run(f"tail -n 25 {home}/moonlight-web.log 2>&1", fatal=False) or "(khong tim thay file)")
+
+    out("\n---- 8) Sunshine log (~/sunshine.log) — tail 25 ----")
+    out(run(f"tail -n 25 {home}/sunshine.log 2>&1", fatal=False) or "(khong tim thay file)")
+
+    out("\n---- 9) Cloudflare tunnel logs (URLs hien tai) ----")
+    for svc in ["novnc", "moonlight-web", "sunshine"]:
+        log_path = f"{home}/{svc}-cloudflare.log"
+        content = run(f"cat {log_path} 2>&1", fatal=False) or ""
+        match = re.search(r"https://[-a-zA-Z0-9]+\.trycloudflare\.com", content)
+        out(f"[{svc}] {match.group() if match else '(chua thay URL — tail log: ' + log_path + ')'}")
+
+    out("\n---- 10) VNC password file (chi kiem tra co ton tai, khong in noi dung) ----")
+    out(run(f"ls -l {home}/.config/tigervnc/passwd 2>&1 || echo '(khong dat mat khau VNC / file khong ton tai)'", fatal=False) or "")
+
+    out("\n---- 11) Session type (X11 vs Wayland) ----")
+    out(run(f"su - {user} -c 'DISPLAY=:1 echo $XDG_SESSION_TYPE' 2>&1", fatal=False) or "(khong xac dinh duoc)")
+
+    out(
+        "\n========================================\n"
+        "Copy TOÀN BỘ output phía trên (từ dòng CLOUD GAMING DIAGNOSTICS) "
+        "và gửi lại để chẩn đoán chính xác lỗi VNC / input.\n"
+        "========================================"
+    )
+
+
 def main():
+
+    if "--diagnose" in sys.argv:
+        check_root()
+        run_full_diagnostics()
+        return
 
     print_update_banner()
 
