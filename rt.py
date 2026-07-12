@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 # cloudgaming_installer.py
-# KDE + Xorg(dummy)+x11vnc + noVNC + Moonlight Web + Sunshine + Cloudflare + Monitor + Steam + Heroic
+# KDE + VNC + noVNC + Moonlight Web + Sunshine + Cloudflare + Monitor
 
 import os
 import sys
 import time
 import re
+import traceback
 import subprocess
 import shutil
 import getpass
@@ -33,10 +34,16 @@ def out(msg):
     log(msg)
 
 
-def run(cmd, silent=True, input_data=None, fatal=True):
+def run(cmd, silent=False, input_data=None, fatal=True):
     try:
         if not silent:
             out(f">>> {cmd}")
+        else:
+            # Keep the console output compact, but the full command
+            # always still goes into the log file so a later "what
+            # happened during install" investigation isn't missing
+            # anything just because it succeeded quietly.
+            log(f">>> {cmd}")
 
         result = subprocess.run(
             cmd,
@@ -46,6 +53,19 @@ def run(cmd, silent=True, input_data=None, fatal=True):
             stderr=subprocess.PIPE,
             text=True
         )
+
+        # Always record full stdout/stderr/exit code to the log file,
+        # success or failure. This is what makes it possible to debug
+        # a VNC/Sunshine problem later -- by the time something looks
+        # wrong, the moment it actually broke is long past, so nothing
+        # useful can be silently dropped here.
+        log(f"EXIT CODE: {result.returncode}")
+
+        if result.stdout.strip():
+            log(f"STDOUT:\n{result.stdout.strip()}")
+
+        if result.stderr.strip():
+            log(f"STDERR:\n{result.stderr.strip()}")
 
         if result.returncode != 0:
             raise Exception(
@@ -63,6 +83,28 @@ def run(cmd, silent=True, input_data=None, fatal=True):
         if fatal:
             sys.exit(1)
         return None
+
+
+def snapshot_logs(label, paths):
+    # Tails a list of service log files (globs allowed) into the
+    # central /var/log/cloudgaming.log with clear headers. Run this
+    # after starting each background service (VNC, Sunshine, noVNC,
+    # Moonlight Web, Cloudflare tunnels) so that if one of them is
+    # broken, there's already a labeled copy of its own log sitting in
+    # one place instead of having to go hunt through the user's home
+    # directory for it.
+    for p in paths:
+
+        content = run(
+            f"su - {USER} -c 'tail -n 200 {p} 2>/dev/null'",
+            silent=True,
+            fatal=False
+        )
+
+        if content:
+            log(
+                f"\n----- {label} LOG :: {p} -----\n{content}\n----- end {label} log -----\n"
+            )
 
 
 def package_installed(pkg):
@@ -94,6 +136,24 @@ def check_root():
     if os.geteuid() != 0:
         out("ERROR: Run with sudo/root")
         sys.exit(1)
+
+
+def record_system_info():
+    # Written once at the very start of every run, so that if VNC or
+    # Sunshine acts up weeks later, the log still shows exactly what
+    # OS/kernel/hardware/free-space situation the install happened
+    # under -- most "works on my machine" VNC/Sunshine bugs turn out
+    # to be OS-version or out-of-disk-space related.
+    out("[LOG] Recording system info for future troubleshooting")
+
+    for cmd in [
+        "uname -a",
+        "cat /etc/os-release",
+        "free -h",
+        "df -h",
+        "lspci | grep -i vga",
+    ]:
+        run(cmd, silent=True, fatal=False)
 
 
 def check_region():
@@ -155,88 +215,56 @@ def create_user():
     if exists.returncode != 0:
 
         out(
-            f"Creating user {USER}"
+            f"[USER] Creating {USER} (no login password)"
         )
 
         run(
             f"useradd -m -s /bin/bash {USER}"
         )
 
-        # Leaving this blank is allowed: instead of setting a password,
-        # we clear it with `passwd -d`, so the account has no password
-        # at all. Login/su still works password-free; sudo is already
-        # NOPASSWD via grant_root_access() below, so this only matters
-        # for direct console/VNC login prompts.
-        passwd = getpass.getpass(
-            "Password (để trống = không mật khẩu): "
+        # No interactive password prompt anymore, and no password set at
+        # all -- the account is unlocked with `passwd -d` so it has an
+        # empty password. This is what keeps the console output short
+        # (no "Password:" prompt hanging the script) and matches the
+        # "password = none" requirement. VNC's own password (below) is
+        # kept separate and still required, since that one is exposed
+        # to the internet through the Cloudflare tunnel.
+        run(
+            f"passwd -d {USER}",
+            silent=True,
+            fatal=False
         )
 
-        if passwd == "":
-            out(
-                f"[USER] Không đặt mật khẩu cho {USER} — tài khoản sẽ đăng nhập không cần mật khẩu"
-            )
-            run(
-                f"passwd -d {USER}"
-            )
-        else:
-            run(
-                f"echo '{USER}:{passwd}' | chpasswd"
-            )
+    else:
+
+        out(
+            f"[SKIP] user {USER} already exists"
+        )
 
 
+    # Auto-grant full root privileges: sudo group membership AND
+    # passwordless sudo, so the created user never has to type a
+    # password to use sudo either.
     run(
         f"usermod -aG sudo {USER}"
     )
 
-    grant_root_access()
-
-
-def grant_root_access():
-
-    # Adds the created user to sudo with NOPASSWD so the background
-    # services this script launches (and anything the user runs later
-    # over VNC/SSH) can escalate to root without an interactive
-    # password prompt. Written as its own file under /etc/sudoers.d/
-    # rather than editing /etc/sudoers directly, and validated with
-    # visudo -c before being left in place so a typo here can't lock
-    # out sudo system-wide.
-
-    out(
-        f"[SUDO] Granting {USER} passwordless root access"
-    )
-
-    sudoers_file = f"/etc/sudoers.d/{USER}-cloudgaming"
-
-    Path(sudoers_file).write_text(
-        f"{USER} ALL=(ALL) NOPASSWD:ALL\n"
+    run(
+        f"echo '{USER} ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/{USER}",
+        silent=True
     )
 
     run(
-        f"chmod 440 {sudoers_file}"
+        f"chmod 440 /etc/sudoers.d/{USER}",
+        silent=True
     )
-
-    check = subprocess.run(
-        f"visudo -c -f {sudoers_file}",
-        shell=True,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL
-    )
-
-    if check.returncode != 0:
-        out(
-            f"[SUDO] WARNING: {sudoers_file} failed validation, removing it"
-        )
-        run(f"rm -f {sudoers_file}", silent=True, fatal=False)
 
 
 
 def install_base():
 
     packages = [
-        "xserver-xorg-core",
-        "xserver-xorg-video-dummy",
-        "x11vnc",
-        "xauth",
+        "tigervnc-standalone-server",
         "kde-plasma-desktop",
         "plasma-workspace",
         "dbus-x11",
@@ -254,24 +282,124 @@ def install_base():
 
 
 
+def install_steam():
+
+    out(
+        "[STEAM] Installing (best-effort, will skip on error)"
+    )
+
+    # Steam needs the i386 architecture enabled on a 64-bit Debian box.
+    # Any failure here is non-fatal -- worst case Steam's own .deb
+    # install below fails too and we just move on, per "nếu lỗi thì
+    # có thể skip".
+    run(
+        "dpkg --add-architecture i386",
+        silent=True,
+        fatal=False
+    )
+
+    run(
+        "apt update",
+        silent=True,
+        fatal=False
+    )
+
+    deb = "/tmp/steam.deb"
+
+    run(
+        f"wget -q https://cdn.cloudflare.steamstatic.com/client/installer/steam.deb -O {deb}",
+        silent=True,
+        fatal=False
+    )
+
+    if os.path.exists(deb):
+
+        run(
+            f"DEBIAN_FRONTEND=noninteractive apt install -y {deb}",
+            silent=True,
+            fatal=False
+        )
+
+    else:
+
+        out(
+            "[SKIP] Steam download failed, continuing without it"
+        )
+
+
+
+def install_heroic():
+
+    out(
+        "[HEROIC] Installing (best-effort, will skip on error)"
+    )
+
+    # Resolve the latest .deb asset from GitHub releases instead of
+    # hardcoding a version -- Heroic's release filenames are versioned,
+    # so a fixed URL would go stale.
+    release_json = run(
+        "curl -s https://api.github.com/repos/Heroic-Games-Launcher/HeroicGamesLauncher/releases/latest",
+        silent=True,
+        fatal=False
+    )
+
+    if not release_json:
+
+        out(
+            "[SKIP] Could not reach GitHub for Heroic release info"
+        )
+
+        return
+
+    match = re.search(
+        r'"browser_download_url":\s*"([^"]+amd64\.deb)"',
+        release_json
+    )
+
+    if not match:
+
+        out(
+            "[SKIP] Could not find a Heroic .deb asset in the latest release"
+        )
+
+        return
+
+    url = match.group(1)
+    deb = "/tmp/heroic.deb"
+
+    run(
+        f"wget -q {url} -O {deb}",
+        silent=True,
+        fatal=False
+    )
+
+    if os.path.exists(deb):
+
+        run(
+            f"DEBIAN_FRONTEND=noninteractive apt install -y {deb}",
+            silent=True,
+            fatal=False
+        )
+
+    else:
+
+        out(
+            "[SKIP] Heroic download failed, continuing without it"
+        )
+
+
+
 def setup_vnc():
 
     out(
-        "[DISPLAY] Setup KDE desktop on real Xorg (dummy driver) + x11vnc"
+        "[VNC] Setup KDE VNC"
     )
 
-    # Root cause of "cursor shows but nothing moves it": TigerVNC's
-    # Xvnc is a headless, self-contained X server that only ever
-    # accepts input through its own RFB/VNC protocol — it never reads
-    # from the kernel input subsystem (/dev/input) at all. Sunshine
-    # injects mouse/keyboard by creating virtual uinput devices at the
-    # kernel level, which only get picked up by an X server that's
-    # actually watching /dev/input via libinput — which Xvnc simply
-    # isn't. Real Xorg (even with no physical GPU, via the "dummy"
-    # video driver) does watch /dev/input, so it sees Sunshine's
-    # uinput devices correctly. x11vnc then bridges that real Xorg
-    # session to VNC/noVNC exactly like Xvnc did, on the same port.
-
+    # Earlier steps in this script write files into $HOME as root
+    # (Path.write_text, urlretrieve, etc). Make sure everything under
+    # $HOME is actually owned by the target user before VNC/X tools
+    # try to use it — several of the errors seen so far trace back to
+    # root-owned files sitting in the user's home directory.
     run(
         f"chown -R {USER}:{USER} {HOME}",
         silent=True
@@ -279,230 +407,181 @@ def setup_vnc():
 
     vnc_dir = f"{HOME}/.config/tigervnc"
 
+    # Newer TigerVNC (>=1.13) stores its config in ~/.config/tigervnc
+    # instead of ~/.vnc, and auto-migrates ~/.vnc there the first time
+    # vncserver runs. That migration breaks if ~/.config doesn't exist
+    # yet (fresh user account) or if ~/.config/tigervnc already exists
+    # partially from an earlier failed run of this script. Fix: wipe
+    # any leftover state and write straight into the new location, so
+    # there's nothing left for vncserver to "migrate".
     run(
-        f"su - {USER} -c 'mkdir -p {vnc_dir}'",
-        fatal=False
+        f"rm -rf {HOME}/.vnc {vnc_dir}",
+        silent=True
     )
 
+    run(
+        f"su - {USER} -c 'mkdir -p {vnc_dir}'"
+    )
+
+    # Plain `vncpasswd` needs a real tty (it uses ioctl to disable echo
+    # while you type). That fails with "Inappropriate ioctl for device"
+    # when this script runs from a notebook/non-interactive shell.
+    # Fix: read the password ourselves with getpass (works without a
+    # tty) and pipe it into `vncpasswd -f`, which reads plaintext from
+    # stdin and writes the obfuscated password file to stdout instead
+    # of prompting.
     vnc_password = getpass.getpass(
-        "VNC password (min 6 chars, để trống = không mật khẩu): "
+        "VNC password (min 6 chars): "
     )
 
-    global VNC_NO_AUTH
-    VNC_NO_AUTH = vnc_password == ""
-
-    if VNC_NO_AUTH:
-        out(
-            "[VNC] Không đặt mật khẩu — VNC sẽ chạy ở chế độ không xác thực"
-        )
-    else:
-        # x11vnc accepts the same obfuscated password format vncpasswd
-        # produces, so this file is reused as-is for -rfbauth below.
-        run(
-            f"su - {USER} -c 'vncpasswd -f > {vnc_dir}/passwd'",
-            input_data=vnc_password + "\n"
-        )
-
-        run(
-            f"chmod 600 {vnc_dir}/passwd"
-        )
-
-        run(
-            f"chown {USER}:{USER} {vnc_dir}/passwd"
-        )
-
-    # --- Dummy Xorg config -------------------------------------------------
-    xorg_conf = "/etc/X11/xorg-dummy.conf"
-
-    Path(xorg_conf).write_text(
-        'Section "Device"\n'
-        '    Identifier "DummyDevice"\n'
-        '    Driver "dummy"\n'
-        '    VideoRam 256000\n'
-        'EndSection\n'
-        '\n'
-        'Section "Monitor"\n'
-        '    Identifier "DummyMonitor"\n'
-        '    HorizSync 5.0 - 1000.0\n'
-        '    VertRefresh 5.0 - 200.0\n'
-        '    Modeline "1920x1080" 173.00 1920 2048 2248 2576 '
-        '1080 1083 1088 1120 -hsync +vsync\n'
-        'EndSection\n'
-        '\n'
-        'Section "Screen"\n'
-        '    Identifier "DummyScreen"\n'
-        '    Device "DummyDevice"\n'
-        '    Monitor "DummyMonitor"\n'
-        '    DefaultDepth 24\n'
-        '    SubSection "Display"\n'
-        '        Depth 24\n'
-        '        Modes "1920x1080"\n'
-        '    EndSubSection\n'
-        'EndSection\n'
-        '\n'
-        'Section "ServerLayout"\n'
-        '    Identifier "DummyLayout"\n'
-        '    Screen "DummyScreen"\n'
-        'EndSection\n'
-        '\n'
-        'Section "ServerFlags"\n'
-        '    Option "AutoAddDevices" "on"\n'
-        '    Option "AutoEnableDevices" "on"\n'
-        '    Option "DontVTSwitch" "on"\n'
-        '    Option "AllowMouseOpenFail" "on"\n'
-        '    Option "PciForceNone" "on"\n'
-        'EndSection\n'
+    run(
+        f"su - {USER} -c 'vncpasswd -f > {vnc_dir}/passwd'",
+        input_data=vnc_password + "\n"
     )
 
-    xauth_file = f"{HOME}/.Xauthority"
+    run(
+        f"chmod 600 {vnc_dir}/passwd"
+    )
 
+    run(
+        f"chown {USER}:{USER} {vnc_dir}/passwd"
+    )
+
+
+    # Two fixes here, both needed for KDE Plasma to survive on TigerVNC:
+    # 1. `exec` instead of `startplasma-x11 &` — backgrounding makes
+    #    the xstartup script itself return immediately, which
+    #    vncserver treats as "session exited too early" and kills it.
+    #    `exec` replaces the shell process with Plasma so the script
+    #    never returns while the session is alive.
+    # 2. `dbus-launch --exit-with-session` — Plasma needs a D-Bus
+    #    session bus to start; without one it crashes within seconds.
+    # 3. `xset s off/-dpms/s noblank` — fixes the classic "blackscreen
+    #    but the machine is still working" bug on TigerVNC: X11's own
+    #    screensaver/blanking still fires on a VNC display even though
+    #    there's no real monitor to blank, and it paints the captured
+    #    framebuffer black. Disabling blanking/DPMS/screensaver at the
+    #    X server level up front stops that from ever kicking in.
+    startup = """#!/bin/bash
+unset SESSION_MANAGER
+unset DBUS_SESSION_BUS_ADDRESS
+xset s off
+xset s noblank
+xset -dpms
+exec dbus-launch --exit-with-session startplasma-x11
+"""
+
+
+    xstartup_path = f"{vnc_dir}/xstartup"
+
+    Path(xstartup_path).write_text(startup)
+
+    run(
+        f"chown {USER}:{USER} {xstartup_path}"
+    )
+
+    run(
+        f"chmod +x {xstartup_path}"
+    )
+
+    # TigerVNC's vncserver wrapper calls `xauth` to set up X11 auth
+    # before it can start Xvnc. When this runs via `su - USER -c` from
+    # a root/notebook process, xauth sometimes can't create
+    # ~/.Xauthority itself (often because earlier root-owned writes
+    # into $HOME left it in a state xauth doesn't like), which makes
+    # the whole session exit within seconds. Pre-creating the file
+    # with the right owner sidesteps that entirely.
     run(
         f"su - {USER} -c 'touch ~/.Xauthority'"
     )
 
     run(
-        f"chown {USER}:{USER} {xauth_file}"
+        f"chown {USER}:{USER} {HOME}/.Xauthority"
     )
 
     run(
-        f"chmod 600 {xauth_file}"
+        f"chmod 600 {HOME}/.Xauthority"
     )
 
-    cookie = run(
-        "mcookie",
-        fatal=False
-    ) or ""
 
-    if cookie:
-        run(
-            f"su - {USER} -c 'xauth -f {xauth_file} add :1 . {cookie}'",
-            fatal=False
-        )
-
-    # Kill anything left over from a previous run of this script
-    # (stuck black screen, broken input, etc.) so the fixes below
-    # actually take effect instead of leaving the old session alone.
-    run("pkill -x Xorg", fatal=False)
-    run("pkill -x x11vnc", fatal=False)
-    run(f"pkill -u {USER} -x startplasma-x11", fatal=False)
-    time.sleep(1)
-
-    out(
-        "[DISPLAY] Starting Xorg :1 (dummy driver)"
-    )
-
-    run(
-        f"nohup Xorg :1 -config {xorg_conf} -auth {xauth_file} "
-        f"-noreset -novtswitch -sharevts "
-        f"> {HOME}/xorg.log 2>&1 &",
-        fatal=False
-    )
-
-    # Wait for the X socket to actually appear instead of guessing a
-    # fixed sleep — Xorg can take anywhere from under a second to
-    # several seconds depending on the machine.
-    xorg_up = False
-    for _ in range(10):
-        time.sleep(1)
-        if os.path.exists("/tmp/.X11-unix/X1"):
-            xorg_up = True
-            break
-
-    if xorg_up:
-        out(
-            "[DISPLAY] Xorg :1 is up"
-        )
-    else:
-        out(
-            "[DISPLAY] WARNING: Xorg :1 did not come up — this is why "
-            "VNC/noVNC can't connect. Last lines of xorg.log:"
-        )
-        xorg_tail = run(
-            f"tail -n 25 {HOME}/xorg.log",
-            fatal=False
-        )
-        out(xorg_tail or "(xorg.log is empty or missing)")
-
-    out(
-        "[DISPLAY] Starting x11vnc bridge (VNC on :5901)"
-    )
-
-    if VNC_NO_AUTH:
-        auth_flag = "-nopw"
-    else:
-        auth_flag = f"-rfbauth {vnc_dir}/passwd"
-
+    # NOTE: do NOT pass "-xstartup startplasma-x11" here.
+    # vncserver's -xstartup flag expects a *path to a script*, not a
+    # command name. Passing a bare command breaks startup and silently
+    # overrides the xstartup file we just wrote above. Leaving -xstartup
+    # out lets vncserver fall back to the default xstartup file, which
+    # already runs startplasma-x11 correctly.
     run(
         f"""
 su - {USER} -c '
-export DISPLAY=:1
-export XAUTHORITY={xauth_file}
-nohup x11vnc -display :1 -auth {xauth_file} \
--forever -shared -rfbport 5901 {auth_flag} \
-> ~/x11vnc.log 2>&1 &
+vncserver :1 \
+-localhost no \
+-geometry 1920x1080 \
+-depth 24
 '
-""",
-        fatal=False
+"""
     )
 
-    vnc_up = False
-    for _ in range(10):
-        time.sleep(1)
-        check = run(
-            "ss -ltn 2>/dev/null | grep -q ':5901 ' && echo UP",
-            fatal=False
-        )
-        if check == "UP":
-            vnc_up = True
-            break
+    # Give Xvnc/Plasma a moment to either settle or crash, then copy
+    # whatever it wrote into the central log. This is the single most
+    # useful log for diagnosing "VNC won't start" / "black screen" /
+    # "Plasma crashed" reports later.
+    time.sleep(3)
 
-    if vnc_up:
-        out(
-            "[DISPLAY] x11vnc is listening on :5901"
-        )
-    else:
-        out(
-            "[DISPLAY] WARNING: x11vnc is not listening on :5901 — "
-            "noVNC will show 'cannot connect'. Last lines of x11vnc.log:"
-        )
-        x11vnc_tail = run(
-            f"tail -n 25 {HOME}/x11vnc.log",
-            fatal=False
-        )
-        out(x11vnc_tail or "(x11vnc.log is empty or missing)")
+    snapshot_logs(
+        "VNC (:1)",
+        [
+            f"{HOME}/.vnc/*:1.log",
+            f"{HOME}/.config/tigervnc/*:1.log",
+        ]
+    )
+
+
+
+def disable_screen_lock():
 
     out(
-        "[DISPLAY] Starting KDE Plasma on :1"
+        "[LOCKSCREEN] Disabling KDE screen lock + power blanking "
+        "(so an idle VNC session never shows the lock screen or goes black)"
     )
 
-    # Xvnc has no real GPU behind it and neither does this dummy Xorg
-    # driver. KWin's default compositor tries OpenGL first, fails
-    # silently against a virtual framebuffer, and the session is left
-    # rendering nothing — a plain black screen. Forcing software
-    # rendering (llvmpipe via LIBGL_ALWAYS_SOFTWARE) and telling
-    # Qt/KWin not to attempt GL integration makes compositing fall
-    # back to a path that actually works without a GPU. The X server
-    # also runs its own independent screensaver/DPMS blanking
-    # regardless of KDE's own lock screen settings (see
-    # disable_screen_lock()), so that's turned off here too.
-    run(
-        f"""
-su - {USER} -c '
-export DISPLAY=:1
-export XAUTHORITY={xauth_file}
-export LIBGL_ALWAYS_SOFTWARE=1
-export QT_XCB_GL_INTEGRATION=none
-export QT_QUICK_BACKEND=software
-export KWIN_COMPOSE=Q
-xset s off
-xset s noblank
-xset -dpms
-nohup dbus-launch --exit-with-session startplasma-x11 \
-> ~/plasma.log 2>&1 &
-'
-""",
-        fatal=False
-    )
+    # Best-effort across both Plasma 5 (kwriteconfig5) and Plasma 6
+    # (kwriteconfig6, likely what ships on Debian trixie) -- whichever
+    # tool doesn't exist on this system just fails silently and we move
+    # on, keeping the output compact.
+    tools = ["kwriteconfig5", "kwriteconfig6"]
+
+    settings = [
+        # Kill the lock screen entirely -- this is the dialog shown in
+        # the screenshot after the VNC session sits idle for a while.
+        ("kscreenlockerrc", "Daemon", "Autolock", "false"),
+        ("kscreenlockerrc", "Daemon", "LockOnResume", "false"),
+        ("kscreenlockerrc", "Daemon", "Timeout", "0"),
+        # Disable screen blanking / DPMS / suspend triggers on both AC
+        # and battery profiles so power management never blacks out the
+        # session either.
+        ("powermanagementprofilesrc", "AC;DPMSControl", "idleTime", "0"),
+        ("powermanagementprofilesrc", "AC;DPMSControl", "enabled", "false"),
+        ("powermanagementprofilesrc", "AC;SuspendSession", "idleTime", "0"),
+        ("powermanagementprofilesrc", "AC;SuspendSession", "suspendThenHibernate", "false"),
+        ("powermanagementprofilesrc", "Battery;DPMSControl", "idleTime", "0"),
+        ("powermanagementprofilesrc", "Battery;DPMSControl", "enabled", "false"),
+        ("powermanagementprofilesrc", "Battery;SuspendSession", "idleTime", "0"),
+        ("powermanagementprofilesrc", "Battery;SuspendSession", "suspendThenHibernate", "false"),
+    ]
+
+    for tool in tools:
+
+        for file, group, key, value in settings:
+
+            group_flags = " ".join(
+                f"--group {g}" for g in group.split(";")
+            )
+
+            run(
+                f"su - {USER} -c \"{tool} --file {file} {group_flags} --key {key} {value}\"",
+                silent=True,
+                fatal=False
+            )
 
 
 
@@ -541,6 +620,13 @@ nohup ~/noVNC/utils/novnc_proxy \
 > ~/novnc.log 2>&1 &
 '
 """
+    )
+
+    time.sleep(2)
+
+    snapshot_logs(
+        "noVNC",
+        [f"{HOME}/novnc.log"]
     )
 
 
@@ -592,161 +678,60 @@ nohup cloudflared tunnel {tls_flag}\
 """
     )
 
+    time.sleep(3)
+
+    snapshot_logs(
+        f"Cloudflare tunnel ({service})",
+        [log_file]
+    )
+
 
 def setup_moonlight_web():
 
     out(
-        "[MOONLIGHT WEB] Installing (optional, will skip on error)"
+        "[MOONLIGHT WEB] Installing"
     )
 
-    archive = f"{HOME}/moonlight-web.tar.gz"
+    package = f"{HOME}/moonlight-web-x86_64-unknown-linux-gnu.tar.gz"
 
-    # The hardcoded "v2.10.0" tag used previously will silently 404 once
-    # a newer release replaces it, aborting the whole installer (run()
-    # is fatal by default). Resolve whatever the *latest* release's
-    # linux x86_64 tarball actually is via the GitHub API instead, the
-    # same pattern used for Heroic in install_heroic().
-    if not os.path.exists(archive):
+
+    if not os.path.exists(package):
 
         run(
             f"""
-DL_URL=$(curl -s https://api.github.com/repos/MrCreativ3001/moonlight-web-stream/releases/latest \
-| grep -oP '"browser_download_url":\\s*"\\K[^"]+x86_64-unknown-linux-gnu\\.tar\\.gz(?=")' \
-| head -n1)
-if [ -n "$DL_URL" ]; then
-    su - {USER} -c "wget -q '$DL_URL' -O {archive}"
-fi
-""",
-            fatal=False
+su - {USER} -c '
+cd ~
+wget -q \
+https://github.com/MrCreativ3001/moonlight-web-stream/releases/download/v2.10.0/moonlight-web-x86_64-unknown-linux-gnu.tar.gz
+'
+"""
         )
 
-    if not os.path.exists(archive) or os.path.getsize(archive) == 0:
-        out(
-            "[MOONLIGHT WEB] WARNING: could not resolve/download latest release — skipping Moonlight Web"
-        )
-        return
 
     run(
-        f"su - {USER} -c 'tar -xzf {archive} -C {HOME}'",
-        fatal=False
-    )
-
-    # Don't assume the archive extracts into a folder literally named
-    # "package" — that name isn't guaranteed to stay stable across
-    # releases. Instead, find wherever the web-server binary actually
-    # landed after extraction.
-    extract_dir = run(
-        f"dirname $(find {HOME} -maxdepth 3 -type f -name web-server | head -n1)",
-        fatal=False
-    )
-
-    if not extract_dir or not os.path.isdir(extract_dir):
-        out(
-            "[MOONLIGHT WEB] WARNING: web-server binary not found after extraction — skipping Moonlight Web"
-        )
-        return
-
-    run(
-        f"chown -R {USER}:{USER} {extract_dir}",
-        fatal=False
-    )
-
-    run(
-        f"chmod +x {extract_dir}/web-server {extract_dir}/streamer",
-        fatal=False
-    )
-
-    started = run(
         f"""
 su - {USER} -c '
-cd {extract_dir}
+cd ~
+tar -xzf moonlight-web-x86_64-unknown-linux-gnu.tar.gz
+
+cd package
+
+chmod +x web-server streamer
+
 nohup ./web-server \
 --bind-address 127.0.0.1:8081 \
-> {HOME}/moonlight-web.log 2>&1 &
+> ~/moonlight-web.log 2>&1 &
 '
-""",
-        fatal=False
+"""
     )
 
-    if started is None:
-        out(
-            "[MOONLIGHT WEB] WARNING: failed to start web-server — skipping Moonlight Web"
-        )
-    else:
-        out(
-            f"[MOONLIGHT WEB] Started from {extract_dir}"
-        )
+    time.sleep(2)
 
-
-
-def setup_sunshine_input():
-
-    # Sunshine injects mouse/keyboard/gamepad events on Linux by
-    # creating virtual devices through /dev/uinput. Without this
-    # setup, opening that device fails silently from Sunshine's
-    # perspective (video still streams fine — capture and input are
-    # independent pipelines) and every click/keypress the client sends
-    # simply goes nowhere, which is exactly "stream works, no cursor,
-    # can't interact".
-
-    out(
-        "[SUNSHINE] Enabling input injection (/dev/uinput)"
+    snapshot_logs(
+        "Moonlight Web",
+        [f"{HOME}/moonlight-web.log"]
     )
 
-    # Ensure the uinput kernel module is loaded now...
-    run(
-        "modprobe uinput",
-        fatal=False
-    )
-
-    # ...and stays loaded on every future boot, not just this run.
-    run(
-        "echo uinput > /etc/modules-load.d/uinput.conf",
-        fatal=False
-    )
-
-    # Group-based permission (rather than the logind "uaccess" tag)
-    # because a VNC desktop typically isn't a proper systemd-logind
-    # seat session, so ACL-based device tags often don't apply to it.
-    udev_rule = "/etc/udev/rules.d/60-sunshine-input.rules"
-
-    Path(udev_rule).write_text(
-        'KERNEL=="uinput", SUBSYSTEM=="misc", '
-        'MODE="0660", GROUP="input", '
-        'OPTIONS+="static_node=uinput"\n'
-    )
-
-    run(
-        "groupadd -f input",
-        fatal=False
-    )
-
-    run(
-        f"usermod -aG input {USER}",
-        fatal=False
-    )
-
-    run(
-        "udevadm control --reload-rules",
-        fatal=False
-    )
-
-    run(
-        "udevadm trigger --name-match=uinput",
-        fatal=False
-    )
-
-    # In case the device node already existed with stale permissions
-    # from before the udev rule was in place.
-    run(
-        "chgrp input /dev/uinput",
-        fatal=False
-    )
-
-    run(
-        "chmod 660 /dev/uinput",
-        fatal=False
-    )
 
 
 def setup_sunshine():
@@ -776,172 +761,33 @@ https://github.com/LizardByte/Sunshine/releases/download/v2026.516.143833/sunshi
     )
 
 
-    setup_sunshine_input()
-
-    out(
-        "[SUNSHINE] Configuring capture/input for the Xorg (dummy) display"
-    )
-
-    # This box has no physical monitor — the only display is the
-    # virtual Xorg (dummy driver) session set up in setup_vnc(). Left
-    # to its defaults, Sunshine tries a GPU/KMS capture backend
-    # looking for a real connected output, finds none, and fails with
-    # "Failed to initialize video capture/encoding. Is a display
-    # connected and turned on?" Forcing the x11 (XShm) backend reads
-    # pixels straight from the Xorg session instead, which works
-    # without any GPU/DRM output.
-    #
-    # For input: setup_sunshine_input() already configures the
-    # uinput/libinput path (the documented default on Linux), which
-    # should now actually work since setup_vnc() switched from Xvnc
-    # (which never reads /dev/input at all) to a real Xorg session
-    # (which does, via libinput). As a second layer of defense, also
-    # request the "xtest" input backend explicitly if this Sunshine
-    # build supports it — XTest talks directly to the X11 display,
-    # the same mechanism x11vnc already uses successfully to move the
-    # cursor, so it sidesteps the uinput/udev/group chain entirely.
-    # If this Sunshine build doesn't have an "input" key, it's simply
-    # ignored rather than breaking anything.
-    sunshine_conf_dir = f"{HOME}/.config/sunshine"
-
-    run(
-        f"su - {USER} -c 'mkdir -p {sunshine_conf_dir}'",
-        fatal=False
-    )
-
-    sunshine_conf = f"{sunshine_conf_dir}/sunshine.conf"
-
-    if not os.path.exists(sunshine_conf):
-        Path(sunshine_conf).write_text("")
-        run(
-            f"chown {USER}:{USER} {sunshine_conf}",
-            fatal=False
-        )
-
-    for key, value in [("capture", "x11"), ("input", "xtest")]:
-        run(
-            f"grep -q '^{key}' {sunshine_conf} && "
-            f"sed -i 's/^{key}.*/{key} = {value}/' {sunshine_conf} || "
-            f"echo '{key} = {value}' >> {sunshine_conf}",
-            fatal=False
-        )
-
     out(
         "[SUNSHINE] Starting"
     )
 
-    # Restart cleanly if a previous run already has it running — a
-    # stale process would keep the old (pre-input-group,
-    # pre-capture-fix) session alive instead of picking up the fixes
-    # above.
-    run(
-        "pkill -u " + USER + " -x sunshine",
-        fatal=False
-    )
 
     run(
         f"""
 su - {USER} -c '
-export DISPLAY=:1
-export XAUTHORITY=~/.Xauthority
 nohup sunshine \
 > ~/sunshine.log 2>&1 &
 '
 """
     )
 
+    time.sleep(3)
 
-def install_steam():
-
-    # Optional: Steam requires the i386 architecture and the
-    # contrib/non-free repos, which aren't guaranteed to be enabled on
-    # a bare Debian install. This whole function is best-effort — if
-    # any step fails (repos not configured, package unavailable on
-    # this Debian release, etc.) it logs a warning and the installer
-    # moves on instead of aborting.
-
-    out(
-        "[STEAM] Installing (optional, will skip on error)"
+    # Sunshine keeps its own internal log (separate from the nohup
+    # wrapper's stdout/stderr capture above) -- both are worth having
+    # on hand since Sunshine problems tend to show up in one but not
+    # the other.
+    snapshot_logs(
+        "Sunshine",
+        [
+            f"{HOME}/sunshine.log",
+            f"{HOME}/.config/sunshine/sunshine.log",
+        ]
     )
-
-    run(
-        "dpkg --add-architecture i386",
-        silent=True,
-        fatal=False
-    )
-
-    run(
-        "apt update",
-        silent=True,
-        fatal=False
-    )
-
-    installed = run(
-        "DEBIAN_FRONTEND=noninteractive apt install -y steam-installer",
-        silent=True,
-        fatal=False
-    )
-
-    if installed is None:
-        out(
-            "[STEAM] WARNING: steam-installer not available "
-            "(contrib/non-free repos may not be enabled) — skipping Steam"
-        )
-    else:
-        out(
-            "[STEAM] Installed successfully"
-        )
-
-
-def install_heroic():
-
-    # Optional: fetches whatever .deb asset the latest Heroic Games
-    # Launcher GitHub release ships (the exact filename changes with
-    # each version, so it's resolved dynamically via the GitHub API
-    # instead of hardcoding a URL). Best-effort like install_steam()
-    # above — any failure just skips Heroic rather than aborting the
-    # whole install.
-
-    out(
-        "[HEROIC] Installing (optional, will skip on error)"
-    )
-
-    deb = "/tmp/heroic.deb"
-
-    run(
-        f"""
-DEB_URL=$(curl -s https://api.github.com/repos/Heroic-Games-Launcher/HeroicGamesLauncher/releases/latest \
-| grep -oP '"browser_download_url":\\s*"\\K[^"]+\\.deb(?=")' \
-| head -n1)
-if [ -n "$DEB_URL" ]; then
-    wget -q "$DEB_URL" -O {deb}
-fi
-""",
-        silent=True,
-        fatal=False
-    )
-
-    if os.path.exists(deb) and os.path.getsize(deb) > 0:
-
-        installed = run(
-            f"apt install -y {deb}",
-            silent=True,
-            fatal=False
-        )
-
-        if installed is None:
-            out(
-                "[HEROIC] WARNING: install failed — skipping Heroic"
-            )
-        else:
-            out(
-                "[HEROIC] Installed successfully"
-            )
-
-    else:
-        out(
-            "[HEROIC] WARNING: could not resolve/download latest .deb — skipping Heroic"
-        )
 
 
 
@@ -990,78 +836,6 @@ cp {file} \
 
 
 
-def disable_screen_lock():
-
-    # By default KDE Plasma locks the session after a period of
-    # inactivity (kscreenlocker), which shows a password prompt over
-    # the VNC feed — the screen users were seeing. Since access to
-    # this desktop is already gated behind the VNC password (or lack
-    # thereof, by choice) and/or the Cloudflare tunnel, an additional
-    # OS-level lock screen just gets in the way for a cloud
-    # gaming/remote desktop box. This disables auto-lock entirely and
-    # unlocks the session immediately if it's already locked.
-
-    out(
-        "[LOCK] Disabling KDE screen lock (kscreenlocker)"
-    )
-
-    config_dir = f"{HOME}/.config"
-
-    run(
-        f"su - {USER} -c 'mkdir -p {config_dir}'",
-        fatal=False
-    )
-
-    kscreenlockerrc = f"{config_dir}/kscreenlockerrc"
-
-    Path(kscreenlockerrc).write_text(
-        "[Daemon]\n"
-        "Autolock=false\n"
-        "LockOnResume=false\n"
-        "LockGrace=0\n"
-        "Timeout=0\n"
-    )
-
-    run(
-        f"chown {USER}:{USER} {kscreenlockerrc}",
-        fatal=False
-    )
-
-    # Also stop power-management from triggering a lock on suspend/
-    # screen-off — Plasma's power profiles have their own independent
-    # "lock screen" toggle that isn't controlled by kscreenlockerrc.
-    for group in [
-        "AC/DimDisplay",
-        "AC/DPMSControl",
-        "Battery/DimDisplay",
-        "Battery/DPMSControl",
-    ]:
-        run(
-            f"su - {USER} -c "
-            f"\"kwriteconfig5 --file powermanagementprofilesrc "
-            f"--group {group} --key lockScreen false\"",
-            fatal=False
-        )
-
-    # If a lock screen is already active in the running session (e.g.
-    # this script is re-run after the first idle timeout already
-    # fired), ask kscreenlocker to unlock it right away instead of
-    # waiting for a password.
-    run(
-        f"su - {USER} -c 'DISPLAY=:1 qdbus org.kde.screensaver "
-        f"/ScreenSaver org.freedesktop.ScreenSaver.SetActive false'",
-        fatal=False
-    )
-
-    # Restart kscreenlocker_greet's daemon so the new config (loaded
-    # only at startup) takes effect without needing a fresh VNC login.
-    run(
-        f"su - {USER} -c 'DISPLAY=:1 kquitapp5 kscreenlocker_greet'",
-        fatal=False
-    )
-
-
-
 def create_monitor(urls):
 
     out(
@@ -1082,12 +856,12 @@ from datetime import datetime
 
 apps={
 "steam":"Steam",
+"heroic":"Heroic",
 "chromium":"Chromium",
 "sunshine":"Sunshine",
-"Xorg":"X11 (Xorg dummy)",
-"x11vnc":"x11vnc",
-"web-server":"Moonlight",
-"heroic":"Heroic"
+"Xorg":"X11",
+"Xtigervnc":"TigerVNC",
+"web-server":"Moonlight"
 }
 
 
@@ -1357,112 +1131,6 @@ curl -u admin:admin \
     )
 
 
-def run_sunshine_diagnostics():
-
-    # Automates the checklist for "stream works but no input":
-    #   1. Is Sunshine actually receiving input events at all?
-    #   2. Is the session X11 (not Wayland)?
-    #   3. Does /dev/uinput exist with usable permissions?
-    #   4. What Sunshine version/build is this?
-    # Printed directly in this run's output so there's no need to
-    # open a separate SSH session just to check these.
-
-    out(
-        "\n=============================="
-    )
-    out(
-        "SUNSHINE INPUT DIAGNOSTICS"
-    )
-    out(
-        "==============================\n"
-    )
-
-    session_type = run(
-        f"su - {USER} -c 'DISPLAY=:1 echo $XDG_SESSION_TYPE'",
-        fatal=False
-    )
-    out(
-        f"[CHECK] XDG_SESSION_TYPE = {session_type or '(empty/unknown)'}"
-    )
-    if session_type and "wayland" in session_type.lower():
-        out(
-            "[CHECK] WARNING: session reports Wayland — Sunshine input "
-            "is most reliable on X11. This installer starts "
-            "startplasma-x11 specifically to avoid this, so if you see "
-            "'wayland' here, some other session took over :1."
-        )
-    else:
-        out(
-            "[CHECK] OK — this is the X11 session started by this script."
-        )
-
-    version = run(
-        "sunshine --version",
-        fatal=False
-    )
-    out(
-        f"[CHECK] sunshine --version -> {version or '(command failed)'}"
-    )
-
-    uinput_ls = run(
-        "ls -l /dev/uinput",
-        fatal=False
-    )
-    if uinput_ls:
-        out(
-            f"[CHECK] /dev/uinput -> {uinput_ls}"
-        )
-    else:
-        out(
-            "[CHECK] WARNING: /dev/uinput does not exist. The uinput "
-            "kernel module likely isn't loaded — run 'modprobe uinput' "
-            "and check 'lsmod | grep uinput'."
-        )
-
-    in_group = run(
-        f"id -nG {USER}",
-        fatal=False
-    )
-    if in_group and "input" in in_group.split():
-        out(
-            f"[CHECK] OK — {USER} is in the 'input' group ({in_group})"
-        )
-    else:
-        out(
-            f"[CHECK] WARNING: {USER} is NOT in the 'input' group "
-            f"(groups: {in_group or 'unknown'}). Sunshine can't open "
-            "/dev/uinput without it."
-        )
-
-    sunshine_log = f"{HOME}/sunshine.log"
-
-    if os.path.exists(sunshine_log):
-        input_hits = run(
-            f"grep -iE 'mouse|keyboard|gamepad|uinput|xtest|input' "
-            f"{sunshine_log} | tail -n 15",
-            fatal=False
-        )
-        out(
-            "[CHECK] Last input-related lines from sunshine.log "
-            "(click/press something in Moonlight first, then re-check "
-            "this file — nothing here means Sunshine received nothing):"
-        )
-        out(
-            input_hits or "(no matching lines found yet)"
-        )
-    else:
-        out(
-            "[CHECK] WARNING: sunshine.log not found at "
-            f"{sunshine_log}"
-        )
-
-    out(
-        "\n[CHECK] To watch input arrive live, run on this machine:\n"
-        f"    tail -f {sunshine_log}\n"
-        "then in Moonlight Web click the stream, press a key, move the "
-        "mouse — you should see corresponding lines appear immediately.\n"
-    )
-
 
 def final_report(urls):
 
@@ -1477,14 +1145,14 @@ def final_report(urls):
 Services:
 
 [OK] KDE Plasma
-[OK] Xorg (dummy) + x11vnc
+[OK] TigerVNC
 [OK] noVNC
 [OK] Moonlight Web
 [OK] Sunshine
 [OK] Chromium
 [OK] Cloudflare Tunnel
-[..] Steam (best-effort)
-[..] Heroic Games Launcher (best-effort)
+[OK] Root/sudo (no password) for the created user
+[OK] Screen lock + screen blanking disabled
 
 """)
 
@@ -1510,9 +1178,24 @@ Services:
             "*-cloudflare.log trong thư mục home)\n"
         )
 
-    print("""Logs:
+    print("""Logs (check these first if VNC or Sunshine misbehaves next time):
 
-/var/log/cloudgaming.log
+  Master install log      /var/log/cloudgaming.log
+                           (every command run by this script, full
+                           stdout/stderr, plus copies of the service
+                           logs below taken right after each service
+                           started)
+
+  VNC / Plasma session     ~/.vnc/*:1.log
+                           ~/.config/tigervnc/*:1.log
+
+  noVNC                    ~/novnc.log
+  Moonlight Web            ~/moonlight-web.log
+  Sunshine (startup)       ~/sunshine.log
+  Sunshine (internal)      ~/.config/sunshine/sunshine.log
+  Cloudflare tunnels       ~/novnc-cloudflare.log
+                           ~/moonlight-web-cloudflare.log
+                           ~/sunshine-cloudflare.log
 
 
 Monitor:
@@ -1544,43 +1227,11 @@ def run_monitor_foreground():
     )
 
 
-def print_update_banner():
-
-    out(
-        "=============================="
-    )
-    out(
-        " CLOUD GAMING INSTALLER"
-    )
-    out(
-        "=============================="
-    )
-    out(
-        "This run includes:\n"
-        "  - Passwordless sudo (NOPASSWD) for the created user\n"
-        "  - Optional empty passwords (Linux account + VNC)\n"
-        "  - Steam + Heroic Games Launcher (best-effort, skips on error)\n"
-        "  - Moonlight Web release resolved dynamically (no hardcoded version)\n"
-        "  - KDE screen-lock (kscreenlocker) disabled\n"
-        "  - Display stack replaced: Xorg (dummy driver) + x11vnc instead of "
-        "TigerVNC/Xvnc, so Sunshine's uinput input can actually reach the "
-        "session (Xvnc never read /dev/input at all)\n"
-        "  - DPMS/screensaver blanking disabled at the X11 level\n"
-        "  - Software rendering forced for KWin (no GPU behind this display)\n"
-        "  - Sunshine capture forced to 'x11', input backend requested as "
-        "'xtest' with uinput/udev group setup as a fallback\n"
-        "  - Automatic input diagnostics printed at the end of this run\n"
-    )
-    out(
-        "=============================="
-    )
-
-
 def main():
 
-    print_update_banner()
-
     check_root()
+
+    record_system_info()
 
     check_region()
 
@@ -1590,7 +1241,13 @@ def main():
 
     install_base()
 
+    install_steam()
+
+    install_heroic()
+
     setup_vnc()
+
+    disable_screen_lock()
 
     setup_novnc()
 
@@ -1627,20 +1284,12 @@ def main():
     )
 
 
-    install_steam()
-
-    install_heroic()
-
-
     setup_wallpaper()
-
-    disable_screen_lock()
 
     urls = get_cloudflare_urls()
 
     create_monitor(urls)
 
-    run_sunshine_diagnostics()
 
     final_report(urls)
 
@@ -1658,4 +1307,26 @@ def main():
 
 if __name__=="__main__":
 
-    main()
+    try:
+        main()
+
+    except SystemExit:
+        # run()'s fatal path already logged the command/reason and
+        # calls sys.exit(1) itself -- re-raise as-is so we don't print
+        # a second, less useful generic traceback on top of it.
+        raise
+
+    except KeyboardInterrupt:
+        out("\n[STOP] Interrupted by user")
+
+    except Exception:
+        # Anything not already handled by run()'s try/except (e.g. a
+        # bug in this script itself) still gets a full traceback saved
+        # to /var/log/cloudgaming.log instead of just vanishing off the
+        # screen when the terminal closes.
+        out("\n====================")
+        out("UNEXPECTED ERROR")
+        out("====================")
+        log(traceback.format_exc())
+        print(traceback.format_exc())
+        sys.exit(1)
