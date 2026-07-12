@@ -398,7 +398,30 @@ def setup_vnc():
         fatal=False
     )
 
-    time.sleep(3)
+    # Wait for the X socket to actually appear instead of guessing a
+    # fixed sleep — Xorg can take anywhere from under a second to
+    # several seconds depending on the machine.
+    xorg_up = False
+    for _ in range(10):
+        time.sleep(1)
+        if os.path.exists("/tmp/.X11-unix/X1"):
+            xorg_up = True
+            break
+
+    if xorg_up:
+        out(
+            "[DISPLAY] Xorg :1 is up"
+        )
+    else:
+        out(
+            "[DISPLAY] WARNING: Xorg :1 did not come up — this is why "
+            "VNC/noVNC can't connect. Last lines of xorg.log:"
+        )
+        xorg_tail = run(
+            f"tail -n 25 {HOME}/xorg.log",
+            fatal=False
+        )
+        out(xorg_tail or "(xorg.log is empty or missing)")
 
     out(
         "[DISPLAY] Starting x11vnc bridge (VNC on :5901)"
@@ -421,6 +444,32 @@ nohup x11vnc -display :1 -auth {xauth_file} \
 """,
         fatal=False
     )
+
+    vnc_up = False
+    for _ in range(10):
+        time.sleep(1)
+        check = run(
+            "ss -ltn 2>/dev/null | grep -q ':5901 ' && echo UP",
+            fatal=False
+        )
+        if check == "UP":
+            vnc_up = True
+            break
+
+    if vnc_up:
+        out(
+            "[DISPLAY] x11vnc is listening on :5901"
+        )
+    else:
+        out(
+            "[DISPLAY] WARNING: x11vnc is not listening on :5901 — "
+            "noVNC will show 'cannot connect'. Last lines of x11vnc.log:"
+        )
+        x11vnc_tail = run(
+            f"tail -n 25 {HOME}/x11vnc.log",
+            fatal=False
+        )
+        out(x11vnc_tail or "(x11vnc.log is empty or missing)")
 
     out(
         "[DISPLAY] Starting KDE Plasma on :1"
@@ -730,18 +779,29 @@ https://github.com/LizardByte/Sunshine/releases/download/v2026.516.143833/sunshi
     setup_sunshine_input()
 
     out(
-        "[SUNSHINE] Configuring capture for headless Xvnc display"
+        "[SUNSHINE] Configuring capture/input for the Xorg (dummy) display"
     )
 
-    # Sunshine has no physical monitor to capture on this box — the
-    # only display that exists is the virtual one Xvnc created at :1
-    # in setup_vnc(). Left to its defaults, Sunshine tries a GPU/KMS
-    # capture backend looking for a real connected output, finds
-    # none, and fails with exactly the error seen in sunshine.log:
+    # This box has no physical monitor — the only display is the
+    # virtual Xorg (dummy driver) session set up in setup_vnc(). Left
+    # to its defaults, Sunshine tries a GPU/KMS capture backend
+    # looking for a real connected output, finds none, and fails with
     # "Failed to initialize video capture/encoding. Is a display
-    # connected and turned on?" Forcing the x11 (XShm) backend makes
-    # it read pixels straight from the Xvnc X server instead, which
-    # works without any GPU/DRM output.
+    # connected and turned on?" Forcing the x11 (XShm) backend reads
+    # pixels straight from the Xorg session instead, which works
+    # without any GPU/DRM output.
+    #
+    # For input: setup_sunshine_input() already configures the
+    # uinput/libinput path (the documented default on Linux), which
+    # should now actually work since setup_vnc() switched from Xvnc
+    # (which never reads /dev/input at all) to a real Xorg session
+    # (which does, via libinput). As a second layer of defense, also
+    # request the "xtest" input backend explicitly if this Sunshine
+    # build supports it — XTest talks directly to the X11 display,
+    # the same mechanism x11vnc already uses successfully to move the
+    # cursor, so it sidesteps the uinput/udev/group chain entirely.
+    # If this Sunshine build doesn't have an "input" key, it's simply
+    # ignored rather than breaking anything.
     sunshine_conf_dir = f"{HOME}/.config/sunshine"
 
     run(
@@ -751,22 +811,18 @@ https://github.com/LizardByte/Sunshine/releases/download/v2026.516.143833/sunshi
 
     sunshine_conf = f"{sunshine_conf_dir}/sunshine.conf"
 
-    if os.path.exists(sunshine_conf):
-        # Config already exists from a previous run — make sure the
-        # capture backend is set correctly without clobbering any
-        # other settings the user may have changed.
-        run(
-            f"grep -q '^capture' {sunshine_conf} && "
-            f"sed -i 's/^capture.*/capture = x11/' {sunshine_conf} || "
-            f"echo 'capture = x11' >> {sunshine_conf}",
-            fatal=False
-        )
-    else:
-        Path(sunshine_conf).write_text(
-            "capture = x11\n"
-        )
+    if not os.path.exists(sunshine_conf):
+        Path(sunshine_conf).write_text("")
         run(
             f"chown {USER}:{USER} {sunshine_conf}",
+            fatal=False
+        )
+
+    for key, value in [("capture", "x11"), ("input", "xtest")]:
+        run(
+            f"grep -q '^{key}' {sunshine_conf} && "
+            f"sed -i 's/^{key}.*/{key} = {value}/' {sunshine_conf} || "
+            f"echo '{key} = {value}' >> {sunshine_conf}",
             fatal=False
         )
 
@@ -1301,6 +1357,112 @@ curl -u admin:admin \
     )
 
 
+def run_sunshine_diagnostics():
+
+    # Automates the checklist for "stream works but no input":
+    #   1. Is Sunshine actually receiving input events at all?
+    #   2. Is the session X11 (not Wayland)?
+    #   3. Does /dev/uinput exist with usable permissions?
+    #   4. What Sunshine version/build is this?
+    # Printed directly in this run's output so there's no need to
+    # open a separate SSH session just to check these.
+
+    out(
+        "\n=============================="
+    )
+    out(
+        "SUNSHINE INPUT DIAGNOSTICS"
+    )
+    out(
+        "==============================\n"
+    )
+
+    session_type = run(
+        f"su - {USER} -c 'DISPLAY=:1 echo $XDG_SESSION_TYPE'",
+        fatal=False
+    )
+    out(
+        f"[CHECK] XDG_SESSION_TYPE = {session_type or '(empty/unknown)'}"
+    )
+    if session_type and "wayland" in session_type.lower():
+        out(
+            "[CHECK] WARNING: session reports Wayland — Sunshine input "
+            "is most reliable on X11. This installer starts "
+            "startplasma-x11 specifically to avoid this, so if you see "
+            "'wayland' here, some other session took over :1."
+        )
+    else:
+        out(
+            "[CHECK] OK — this is the X11 session started by this script."
+        )
+
+    version = run(
+        "sunshine --version",
+        fatal=False
+    )
+    out(
+        f"[CHECK] sunshine --version -> {version or '(command failed)'}"
+    )
+
+    uinput_ls = run(
+        "ls -l /dev/uinput",
+        fatal=False
+    )
+    if uinput_ls:
+        out(
+            f"[CHECK] /dev/uinput -> {uinput_ls}"
+        )
+    else:
+        out(
+            "[CHECK] WARNING: /dev/uinput does not exist. The uinput "
+            "kernel module likely isn't loaded — run 'modprobe uinput' "
+            "and check 'lsmod | grep uinput'."
+        )
+
+    in_group = run(
+        f"id -nG {USER}",
+        fatal=False
+    )
+    if in_group and "input" in in_group.split():
+        out(
+            f"[CHECK] OK — {USER} is in the 'input' group ({in_group})"
+        )
+    else:
+        out(
+            f"[CHECK] WARNING: {USER} is NOT in the 'input' group "
+            f"(groups: {in_group or 'unknown'}). Sunshine can't open "
+            "/dev/uinput without it."
+        )
+
+    sunshine_log = f"{HOME}/sunshine.log"
+
+    if os.path.exists(sunshine_log):
+        input_hits = run(
+            f"grep -iE 'mouse|keyboard|gamepad|uinput|xtest|input' "
+            f"{sunshine_log} | tail -n 15",
+            fatal=False
+        )
+        out(
+            "[CHECK] Last input-related lines from sunshine.log "
+            "(click/press something in Moonlight first, then re-check "
+            "this file — nothing here means Sunshine received nothing):"
+        )
+        out(
+            input_hits or "(no matching lines found yet)"
+        )
+    else:
+        out(
+            "[CHECK] WARNING: sunshine.log not found at "
+            f"{sunshine_log}"
+        )
+
+    out(
+        "\n[CHECK] To watch input arrive live, run on this machine:\n"
+        f"    tail -f {sunshine_log}\n"
+        "then in Moonlight Web click the stream, press a key, move the "
+        "mouse — you should see corresponding lines appear immediately.\n"
+    )
+
 
 def final_report(urls):
 
@@ -1382,7 +1544,41 @@ def run_monitor_foreground():
     )
 
 
+def print_update_banner():
+
+    out(
+        "=============================="
+    )
+    out(
+        " CLOUD GAMING INSTALLER"
+    )
+    out(
+        "=============================="
+    )
+    out(
+        "This run includes:\n"
+        "  - Passwordless sudo (NOPASSWD) for the created user\n"
+        "  - Optional empty passwords (Linux account + VNC)\n"
+        "  - Steam + Heroic Games Launcher (best-effort, skips on error)\n"
+        "  - Moonlight Web release resolved dynamically (no hardcoded version)\n"
+        "  - KDE screen-lock (kscreenlocker) disabled\n"
+        "  - Display stack replaced: Xorg (dummy driver) + x11vnc instead of "
+        "TigerVNC/Xvnc, so Sunshine's uinput input can actually reach the "
+        "session (Xvnc never read /dev/input at all)\n"
+        "  - DPMS/screensaver blanking disabled at the X11 level\n"
+        "  - Software rendering forced for KWin (no GPU behind this display)\n"
+        "  - Sunshine capture forced to 'x11', input backend requested as "
+        "'xtest' with uinput/udev group setup as a fallback\n"
+        "  - Automatic input diagnostics printed at the end of this run\n"
+    )
+    out(
+        "=============================="
+    )
+
+
 def main():
+
+    print_update_banner()
 
     check_root()
 
@@ -1444,6 +1640,7 @@ def main():
 
     create_monitor(urls)
 
+    run_sunshine_diagnostics()
 
     final_report(urls)
 
