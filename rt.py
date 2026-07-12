@@ -597,6 +597,47 @@ https://github.com/LizardByte/Sunshine/releases/download/v2026.516.143833/sunshi
 
 
     out(
+        "[SUNSHINE] Configuring capture for headless Xvnc display"
+    )
+
+    # Sunshine has no physical monitor to capture on this box — the
+    # only display that exists is the virtual one Xvnc created at :1
+    # in setup_vnc(). Left to its defaults, Sunshine tries a GPU/KMS
+    # capture backend looking for a real connected output, finds
+    # none, and fails with exactly the error seen in sunshine.log:
+    # "Failed to initialize video capture/encoding. Is a display
+    # connected and turned on?" Forcing the x11 (XShm) backend makes
+    # it read pixels straight from the Xvnc X server instead, which
+    # works without any GPU/DRM output.
+    sunshine_conf_dir = f"{HOME}/.config/sunshine"
+
+    run(
+        f"su - {USER} -c 'mkdir -p {sunshine_conf_dir}'",
+        fatal=False
+    )
+
+    sunshine_conf = f"{sunshine_conf_dir}/sunshine.conf"
+
+    if os.path.exists(sunshine_conf):
+        # Config already exists from a previous run — make sure the
+        # capture backend is set correctly without clobbering any
+        # other settings the user may have changed.
+        run(
+            f"grep -q '^capture' {sunshine_conf} && "
+            f"sed -i 's/^capture.*/capture = x11/' {sunshine_conf} || "
+            f"echo 'capture = x11' >> {sunshine_conf}",
+            fatal=False
+        )
+    else:
+        Path(sunshine_conf).write_text(
+            "capture = x11\n"
+        )
+        run(
+            f"chown {USER}:{USER} {sunshine_conf}",
+            fatal=False
+        )
+
+    out(
         "[SUNSHINE] Starting"
     )
 
@@ -604,6 +645,8 @@ https://github.com/LizardByte/Sunshine/releases/download/v2026.516.143833/sunshi
     run(
         f"""
 su - {USER} -c '
+export DISPLAY=:1
+export XAUTHORITY=~/.Xauthority
 nohup sunshine \
 > ~/sunshine.log 2>&1 &
 '
