@@ -6,7 +6,6 @@ import os
 import sys
 import time
 import re
-import shlex
 import subprocess
 import shutil
 import getpass
@@ -297,16 +296,11 @@ def setup_vnc():
             "[VNC] Không đặt mật khẩu — VNC sẽ chạy ở chế độ không xác thực"
         )
     else:
-        # BUG FIX: the previous version shelled out to `vncpasswd`, which
-        # comes from the tigervnc package -- but install_base() never
-        # installs tigervnc, only x11vnc. That's exactly the
-        # "vncpasswd: command not found" crash. x11vnc ships its own
-        # equivalent tool (`x11vnc -storepasswd`), which writes the same
-        # obfuscated password format `-rfbauth` expects below, so no new
-        # package is needed.
-        quoted_pw = shlex.quote(vnc_password)
+        # x11vnc accepts the same obfuscated password format vncpasswd
+        # produces, so this file is reused as-is for -rfbauth below.
         run(
-            f"su - {USER} -c 'x11vnc -storepasswd {quoted_pw} {vnc_dir}/passwd'"
+            f"su - {USER} -c 'vncpasswd -f > {vnc_dir}/passwd'",
+            input_data=vnc_password + "\n"
         )
 
         run(
@@ -754,59 +748,6 @@ def setup_sunshine_input():
         fatal=False
     )
 
-    check_uinput_support()
-
-
-def check_uinput_support():
-
-    # This is the single most common real-world reason "stream works but
-    # mouse/keyboard do nothing": on a plain KVM/full-virtualization VPS
-    # the steps above are enough, but on a container-based VPS (LXC,
-    # OpenVZ, or a Docker host) the *host* controls which kernel modules
-    # and device nodes are visible inside the guest. In that case
-    # `modprobe uinput` and the udev rule above can both "succeed" with
-    # no error while /dev/uinput still never appears -- Sunshine then has
-    # nothing to inject events into, no matter how it's configured.
-
-    global UINPUT_AVAILABLE
-
-    virt = run(
-        "systemd-detect-virt 2>/dev/null || echo unknown",
-        fatal=False
-    ) or "unknown"
-
-    exists = os.path.exists("/dev/uinput")
-
-    out(
-        f"[UINPUT] Virtualization detected: {virt}"
-    )
-    out(
-        f"[UINPUT] /dev/uinput exists after modprobe: {exists}"
-    )
-
-    UINPUT_AVAILABLE = exists
-
-    if not exists:
-        out(
-            "[UINPUT] CANH BAO QUAN TRONG: /dev/uinput KHONG xuat hien sau khi "
-            "modprobe. Neu VPS nay chay tren container (lxc/openvz/docker) thay vi "
-            "KVM/full virtualization, host se KHONG cho phep tao thiet bi nay ben "
-            "trong container -- va Sunshine se KHONG BAO GIO dieu khien duoc "
-            "chuot/ban phim du cau hinh gi di nua (video van stream binh thuong vi "
-            "capture va input la hai duong hoan toan doc lap). Day rat co the la "
-            "nguyen nhan chinh cua loi 'stream duoc nhung khong dieu khien duoc'. "
-            f"Virtualization hien tai bao cao la '{virt}'. Neu day la 'lxc', "
-            "'openvz', hoac 'docker', hay yeu cau nha cung cap VPS doi sang KVM "
-            "(day la gioi han cua ha tang, khong phai loi cau hinh trong script nay)."
-        )
-    else:
-        out(
-            "[UINPUT] OK -- /dev/uinput ton tai, Sunshine co the inject input binh "
-            "thuong mien la user nam trong group 'input' (da duoc cau hinh o tren)."
-        )
-
-    return exists
-
 
 def setup_sunshine():
 
@@ -817,18 +758,6 @@ def setup_sunshine():
 
     deb="/tmp/sunshine.deb"
 
-    # BUG FIX: if a previous run of this script crashed mid-download
-    # (e.g. network blip), a corrupt/partial /tmp/sunshine.deb can be
-    # left behind. The old code only checked "does the file exist" and
-    # would silently try to install that broken file forever, which can
-    # look like "Sunshine is installed" while actually running a stale
-    # or broken binary. Also require a non-trivial size before trusting
-    # the cached file.
-    if os.path.exists(deb) and os.path.getsize(deb) < 1_000_000:
-        out(
-            "[SUNSHINE] Cached /tmp/sunshine.deb looks incomplete/corrupt -- re-downloading"
-        )
-        run(f"rm -f {deb}", silent=True, fatal=False)
 
     if not os.path.exists(deb):
 
@@ -1490,18 +1419,6 @@ def run_sunshine_diagnostics():
             "and check 'lsmod | grep uinput'."
         )
 
-    if not globals().get("UINPUT_AVAILABLE", uinput_ls is not None):
-        virt = run(
-            "systemd-detect-virt 2>/dev/null || echo unknown",
-            fatal=False
-        ) or "unknown"
-        out(
-            f"[CHECK] Virtualization: {virt}. Neu day la container "
-            "(lxc/openvz/docker) chu khong phai KVM, day chinh la ly do "
-            "chuot/ban phim khong bao gio hoat dong duoc du cau hinh Sunshine "
-            "the nao — can doi sang VPS KVM."
-        )
-
     in_group = run(
         f"id -nG {USER}",
         fatal=False
@@ -1640,14 +1557,6 @@ def print_update_banner():
     )
     out(
         "This run includes:\n"
-        "  - FIX: VNC password setup no longer calls the missing "
-        "'vncpasswd' binary (was crashing setup_vnc with 'command not "
-        "found') -- now uses x11vnc's own built-in 'storepasswd'\n"
-        "  - FIX: automatic uinput/virtualization check reports clearly "
-        "if this VPS is a container (lxc/openvz/docker) that structurally "
-        "blocks Sunshine mouse/keyboard input, instead of failing silently\n"
-        "  - FIX: stale/corrupt cached sunshine.deb from a crashed previous "
-        "run is now detected and re-downloaded instead of reused\n"
         "  - Passwordless sudo (NOPASSWD) for the created user\n"
         "  - Optional empty passwords (Linux account + VNC)\n"
         "  - Steam + Heroic Games Launcher (best-effort, skips on error)\n"
@@ -1667,81 +1576,7 @@ def print_update_banner():
     )
 
 
-def run_full_diagnostics():
-
-    # One-shot diagnostic dump: gathers everything needed to debug
-    # "VNC không connect được" and "Moonlight Web không nhận input"
-    # in a single run, so there's no need to SSH in and manually
-    # tail/grep half a dozen files. Safe to run repeatedly and does
-    # not touch/restart any running service.
-
-    out("========================================")
-    out(" CLOUD GAMING DIAGNOSTICS")
-    out("========================================\n")
-
-    user = input(
-        "Linux username đã dùng khi cài đặt: "
-    ).strip()
-
-    home = f"/home/{user}"
-
-    out(f"\n[INFO] USER={user} HOME={home}\n")
-
-    out("---- 1) Virtualization / uinput (Sunshine + Moonlight input) ----")
-    virt = run("systemd-detect-virt 2>/dev/null || echo unknown", fatal=False) or "unknown"
-    out(f"Virtualization: {virt}")
-    out(run("ls -l /dev/uinput 2>&1 || echo '/dev/uinput KHONG TON TAI'", fatal=False) or "")
-    out(run(f"id -nG {user} 2>&1", fatal=False) or "")
-    out(run("lsmod | grep -i uinput || echo 'module uinput KHONG duoc load'", fatal=False) or "")
-
-    out("\n---- 2) Processes (Xorg / x11vnc / noVNC / Sunshine / moonlight-web / cloudflared) ----")
-    out(run("ps aux | grep -E 'Xorg|x11vnc|novnc_proxy|websockify|sunshine|web-server|cloudflared' | grep -v grep", fatal=False) or "(khong thay process nao dang chay)")
-
-    out("\n---- 3) Listening ports (5901=x11vnc, 6001=noVNC, 8081=moonlight-web, 47990=sunshine) ----")
-    out(run("ss -ltnp 2>/dev/null | grep -E ':5901|:6001|:8081|:47990' || echo '(khong co port nao dang listen trong 4 port tren)'", fatal=False) or "")
-
-    out("\n---- 4) Xorg log (~/xorg.log) — tail 25 ----")
-    out(run(f"tail -n 25 {home}/xorg.log 2>&1", fatal=False) or "(khong tim thay file)")
-
-    out("\n---- 5) x11vnc log (~/x11vnc.log) — tail 25 ----")
-    out(run(f"tail -n 25 {home}/x11vnc.log 2>&1", fatal=False) or "(khong tim thay file)")
-
-    out("\n---- 6) noVNC log (~/novnc.log) — tail 25 ----")
-    out(run(f"tail -n 25 {home}/novnc.log 2>&1", fatal=False) or "(khong tim thay file)")
-
-    out("\n---- 7) Moonlight Web log (~/moonlight-web.log) — tail 25 ----")
-    out(run(f"tail -n 25 {home}/moonlight-web.log 2>&1", fatal=False) or "(khong tim thay file)")
-
-    out("\n---- 8) Sunshine log (~/sunshine.log) — tail 25 ----")
-    out(run(f"tail -n 25 {home}/sunshine.log 2>&1", fatal=False) or "(khong tim thay file)")
-
-    out("\n---- 9) Cloudflare tunnel logs (URLs hien tai) ----")
-    for svc in ["novnc", "moonlight-web", "sunshine"]:
-        log_path = f"{home}/{svc}-cloudflare.log"
-        content = run(f"cat {log_path} 2>&1", fatal=False) or ""
-        match = re.search(r"https://[-a-zA-Z0-9]+\.trycloudflare\.com", content)
-        out(f"[{svc}] {match.group() if match else '(chua thay URL — tail log: ' + log_path + ')'}")
-
-    out("\n---- 10) VNC password file (chi kiem tra co ton tai, khong in noi dung) ----")
-    out(run(f"ls -l {home}/.config/tigervnc/passwd 2>&1 || echo '(khong dat mat khau VNC / file khong ton tai)'", fatal=False) or "")
-
-    out("\n---- 11) Session type (X11 vs Wayland) ----")
-    out(run(f"su - {user} -c 'DISPLAY=:1 echo $XDG_SESSION_TYPE' 2>&1", fatal=False) or "(khong xac dinh duoc)")
-
-    out(
-        "\n========================================\n"
-        "Copy TOÀN BỘ output phía trên (từ dòng CLOUD GAMING DIAGNOSTICS) "
-        "và gửi lại để chẩn đoán chính xác lỗi VNC / input.\n"
-        "========================================"
-    )
-
-
 def main():
-
-    if "--diagnose" in sys.argv:
-        check_root()
-        run_full_diagnostics()
-        return
 
     print_update_banner()
 
