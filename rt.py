@@ -18,6 +18,10 @@ from datetime import datetime
 
 LOG_FILE = "/var/log/cloudgaming.log"
 
+# Everything now runs as root, in root's own home -- no separate
+# Linux user is created anymore.
+HOME = "/root"
+
 # Set by choose_ui() before anything else installs. "kde" = full KDE
 # Plasma desktop, "xfce" = lightweight XFCE (much lower RAM/CPU
 # footprint, better for small/cheap VPS boxes).
@@ -101,7 +105,7 @@ def snapshot_logs(label, paths):
     for p in paths:
 
         content = run(
-            f"su - {USER} -c 'tail -n 200 {p} 2>/dev/null'",
+            f"tail -n 200 {p} 2>/dev/null",
             silent=True,
             fatal=False
         )
@@ -228,74 +232,6 @@ def update_system():
         "apt upgrade -y",
         silent=True
     )
-
-
-def create_user():
-
-    global USER, HOME
-
-    USER = input(
-        "Linux username: "
-    )
-
-    HOME = f"/home/{USER}"
-
-
-    exists = subprocess.run(
-        f"id {USER}",
-        shell=True,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL
-    )
-
-
-    if exists.returncode != 0:
-
-        out(
-            f"[USER] Creating {USER} (no login password)"
-        )
-
-        run(
-            f"useradd -m -s /bin/bash {USER}"
-        )
-
-        # No interactive password prompt anymore, and no password set at
-        # all -- the account is unlocked with `passwd -d` so it has an
-        # empty password. This is what keeps the console output short
-        # (no "Password:" prompt hanging the script) and matches the
-        # "password = none" requirement. VNC's own password (below) is
-        # kept separate and still required, since that one is exposed
-        # to the internet through the Cloudflare tunnel.
-        run(
-            f"passwd -d {USER}",
-            silent=True,
-            fatal=False
-        )
-
-    else:
-
-        out(
-            f"[SKIP] user {USER} already exists"
-        )
-
-
-    # Auto-grant full root privileges: sudo group membership AND
-    # passwordless sudo, so the created user never has to type a
-    # password to use sudo either.
-    run(
-        f"usermod -aG sudo {USER}"
-    )
-
-    run(
-        f"echo '{USER} ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/{USER}",
-        silent=True
-    )
-
-    run(
-        f"chmod 440 /etc/sudoers.d/{USER}",
-        silent=True
-    )
-
 
 
 def install_base():
@@ -450,17 +386,7 @@ def install_heroic():
 def setup_vnc():
 
     out(
-        "[VNC] Setup KDE VNC"
-    )
-
-    # Earlier steps in this script write files into $HOME as root
-    # (Path.write_text, urlretrieve, etc). Make sure everything under
-    # $HOME is actually owned by the target user before VNC/X tools
-    # try to use it — several of the errors seen so far trace back to
-    # root-owned files sitting in the user's home directory.
-    run(
-        f"chown -R {USER}:{USER} {HOME}",
-        silent=True
+        "[VNC] Setup"
     )
 
     vnc_dir = f"{HOME}/.config/tigervnc"
@@ -478,7 +404,7 @@ def setup_vnc():
     )
 
     run(
-        f"su - {USER} -c 'mkdir -p {vnc_dir}'"
+        f"mkdir -p {vnc_dir}"
     )
 
     # Plain `vncpasswd` needs a real tty (it uses ioctl to disable echo
@@ -493,16 +419,12 @@ def setup_vnc():
     )
 
     run(
-        f"su - {USER} -c 'vncpasswd -f > {vnc_dir}/passwd'",
+        f"vncpasswd -f > {vnc_dir}/passwd",
         input_data=vnc_password + "\n"
     )
 
     run(
         f"chmod 600 {vnc_dir}/passwd"
-    )
-
-    run(
-        f"chown {USER}:{USER} {vnc_dir}/passwd"
     )
 
 
@@ -539,30 +461,19 @@ exec dbus-launch --exit-with-session {session_cmd}
     Path(xstartup_path).write_text(startup)
 
     run(
-        f"chown {USER}:{USER} {xstartup_path}"
-    )
-
-    run(
         f"chmod +x {xstartup_path}"
     )
 
     # TigerVNC's vncserver wrapper calls `xauth` to set up X11 auth
-    # before it can start Xvnc. When this runs via `su - USER -c` from
-    # a root/notebook process, xauth sometimes can't create
-    # ~/.Xauthority itself (often because earlier root-owned writes
-    # into $HOME left it in a state xauth doesn't like), which makes
-    # the whole session exit within seconds. Pre-creating the file
-    # with the right owner sidesteps that entirely.
+    # before it can start Xvnc. Pre-creating ~/.Xauthority up front
+    # sidesteps the "xauth can't create the file" failure mode that
+    # otherwise makes the whole session exit within seconds.
     run(
-        f"su - {USER} -c 'touch ~/.Xauthority'"
+        "touch /root/.Xauthority"
     )
 
     run(
-        f"chown {USER}:{USER} {HOME}/.Xauthority"
-    )
-
-    run(
-        f"chmod 600 {HOME}/.Xauthority"
+        "chmod 600 /root/.Xauthority"
     )
 
 
@@ -572,14 +483,16 @@ exec dbus-launch --exit-with-session {session_cmd}
     # overrides the xstartup file we just wrote above. Leaving -xstartup
     # out lets vncserver fall back to the default xstartup file, which
     # already runs the chosen desktop session correctly.
+    #
+    # Running vncserver directly as root (no `su`) is what makes
+    # "ALL IN ROOT" possible -- TigerVNC and both desktop UIs work
+    # fine as root, they just normally aren't run that way.
     run(
-        f"""
-su - {USER} -c '
+        """
 vncserver :1 \
 -localhost no \
 -geometry 1920x1080 \
 -depth 24
-'
 """
     )
 
@@ -648,7 +561,7 @@ def disable_screen_lock_kde():
             )
 
             run(
-                f"su - {USER} -c \"{tool} --file {file} {group_flags} --key {key} {value}\"",
+                f"{tool} --file {file} {group_flags} --key {key} {value}",
                 silent=True,
                 fatal=False
             )
@@ -678,8 +591,8 @@ def disable_screen_lock_xfce():
     for channel, prop, value, vtype in settings:
 
         run(
-            f"su - {USER} -c \"DISPLAY=:1 xfconf-query -c {channel} -p {prop} "
-            f"--create -t {vtype} -s {value}\"",
+            f"DISPLAY=:1 xfconf-query -c {channel} -p {prop} "
+            f"--create -t {vtype} -s {value}",
             silent=True,
             fatal=False
         )
@@ -687,7 +600,7 @@ def disable_screen_lock_xfce():
     # Also disable light-locker if it's the one installed instead of
     # xfce4-screensaver -- easiest to just make sure it's not running.
     run(
-        f"su - {USER} -c 'killall light-locker'",
+        "killall light-locker",
         silent=True,
         fatal=False
     )
@@ -706,12 +619,7 @@ def setup_novnc():
     if not os.path.exists(path):
 
         run(
-            f"""
-su - {USER} -c '
-cd ~
-git clone https://github.com/novnc/noVNC.git
-'
-"""
+            f"cd {HOME} && git clone https://github.com/novnc/noVNC.git"
         )
 
     else:
@@ -722,12 +630,10 @@ git clone https://github.com/novnc/noVNC.git
 
     run(
         f"""
-su - {USER} -c '
-nohup ~/noVNC/utils/novnc_proxy \
+nohup {HOME}/noVNC/utils/novnc_proxy \
 --vnc localhost:5901 \
 --listen 6001 \
-> ~/novnc.log 2>&1 &
-'
+> {HOME}/novnc.log 2>&1 &
 """
     )
 
@@ -779,11 +685,9 @@ def start_cloudflare(service, port, scheme="http", no_tls_verify=False):
 
     run(
         f"""
-su - {USER} -c '
 nohup cloudflared tunnel {tls_flag}\
 --url {scheme}://localhost:{port} \
 > {log_file} 2>&1 &
-'
 """
     )
 
@@ -807,30 +711,22 @@ def setup_moonlight_web():
     if not os.path.exists(package):
 
         run(
-            f"""
-su - {USER} -c '
-cd ~
-wget -q \
-https://github.com/MrCreativ3001/moonlight-web-stream/releases/download/v2.10.0/moonlight-web-x86_64-unknown-linux-gnu.tar.gz
-'
-"""
+            f"cd {HOME} && wget -q "
+            "https://github.com/MrCreativ3001/moonlight-web-stream/releases/download/v2.10.0/moonlight-web-x86_64-unknown-linux-gnu.tar.gz"
         )
 
 
     run(
         f"""
-su - {USER} -c '
-cd ~
-tar -xzf moonlight-web-x86_64-unknown-linux-gnu.tar.gz
+cd {HOME} && tar -xzf moonlight-web-x86_64-unknown-linux-gnu.tar.gz
 
-cd package
+cd {HOME}/package
 
 chmod +x web-server streamer
 
 nohup ./web-server \
 --bind-address 127.0.0.1:8081 \
-> ~/moonlight-web.log 2>&1 &
-'
+> {HOME}/moonlight-web.log 2>&1 &
 """
     )
 
@@ -877,10 +773,8 @@ https://github.com/LizardByte/Sunshine/releases/download/v2026.516.143833/sunshi
 
     run(
         f"""
-su - {USER} -c '
 nohup sunshine \
-> ~/sunshine.log 2>&1 &
-'
+> {HOME}/sunshine.log 2>&1 &
 """
     )
 
@@ -920,12 +814,10 @@ def setup_wallpaper():
 
     run(
         f"""
-su - {USER} -c '
-mkdir -p ~/.local/share/wallpapers
+mkdir -p {HOME}/.local/share/wallpapers
 
 cp {file} \
-~/.local/share/wallpapers/wallpaper.png
-'
+{HOME}/.local/share/wallpapers/wallpaper.png
 """
     )
 
@@ -940,16 +832,16 @@ cp {file} \
     if UI == "xfce":
 
         run(
-            f"su - {USER} -c \"DISPLAY=:1 xfconf-query -c xfce4-desktop "
+            f"DISPLAY=:1 xfconf-query -c xfce4-desktop "
             f"-p /backdrop/screen0/monitor0/workspace0/last-image "
-            f"--create -t string -s {HOME}/.local/share/wallpapers/wallpaper.png\"",
+            f"--create -t string -s {HOME}/.local/share/wallpapers/wallpaper.png",
             fatal=False
         )
 
     else:
 
         run(
-            f"su - {USER} -c 'DISPLAY=:1 plasma-apply-wallpaperimage ~/.local/share/wallpapers/wallpaper.png'",
+            f"DISPLAY=:1 plasma-apply-wallpaperimage {HOME}/.local/share/wallpapers/wallpaper.png",
             fatal=False
         )
 
@@ -1131,7 +1023,7 @@ while True:
     Path(monitor).write_text(code)
 
     run(
-        f"chown {USER}:{USER} {monitor}"
+        f"chmod +x {monitor}"
     )
 
     # URLs are saved separately by get_cloudflare_urls() into
@@ -1190,11 +1082,6 @@ def get_cloudflare_urls():
     urls_file = f"{HOME}/.cloudgaming_urls"
 
     Path(urls_file).write_text("\n".join(lines))
-
-    run(
-        f"chown {USER}:{USER} {urls_file}",
-        silent=True
-    )
 
     if not urls:
         out(
@@ -1272,7 +1159,7 @@ Services:
 [OK] Sunshine
 [OK] Chromium
 [OK] Cloudflare Tunnel
-[OK] Root/sudo (no password) for the created user
+[OK] Running as root (no separate Linux user)
 [OK] Screen lock + screen blanking disabled
 
 """)
@@ -1338,13 +1225,13 @@ def run_monitor_foreground():
 
     time.sleep(1)
 
-    # Replaces this process with the monitor running as the target
-    # user, in the foreground, attached to the current terminal — so
-    # it stays open and visible instead of silently dying in a log
-    # file like the old nohup version did.
+    # Replaces this process with the monitor, in the foreground,
+    # attached to the current terminal — so it stays open and visible
+    # instead of silently dying in a log file like the old nohup
+    # version did. Runs directly as root now, no `su` needed.
     os.execvp(
-        "su",
-        ["su", "-", USER, "-c", f"python3 {HOME}/cloud-monitor.py"]
+        "python3",
+        ["python3", f"{HOME}/cloud-monitor.py"]
     )
 
 
@@ -1357,8 +1244,6 @@ def main():
     choose_ui()
 
     check_region()
-
-    create_user()
 
     update_system()
 
