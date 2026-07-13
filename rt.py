@@ -397,6 +397,7 @@ def setup_vnc():
     )
 
     vnc_dir = f"{HOME}/.config/tigervnc"
+    legacy_vnc_dir = f"{HOME}/.vnc"
 
     # Newer TigerVNC (>=1.13) stores its config in ~/.config/tigervnc
     # instead of ~/.vnc, and auto-migrates ~/.vnc there the first time
@@ -406,7 +407,7 @@ def setup_vnc():
     # any leftover state and write straight into the new location, so
     # there's nothing left for vncserver to "migrate".
     run(
-        f"rm -rf {HOME}/.vnc {vnc_dir}",
+        f"rm -rf {legacy_vnc_dir} {vnc_dir}",
         silent=True
     )
 
@@ -473,6 +474,31 @@ def setup_vnc():
         f"chmod 600 {vnc_dir}/passwd"
     )
 
+    # FIX: some TigerVNC builds don't honor ~/.config/tigervnc/passwd
+    # as the default password location and instead have `vncserver`
+    # fall back to launching Xvnc's own *interactive* password setup
+    # if it can't find a password file where *it* expects one. That
+    # interactive fallback needs a controlling tty; under a notebook
+    # runtime (no tty at all) it dies with:
+    #   "getpassword error: Inappropriate ioctl for device"
+    # even though the vncpasswd step above succeeded fine.
+    #
+    # Fix: also drop a copy at the legacy ~/.vnc/passwd path, AND pass
+    # -rfbauth explicitly to vncserver below so Xvnc is told exactly
+    # which file to use and never tries to prompt for one itself,
+    # regardless of which convention this particular build expects.
+    run(
+        f"mkdir -p {legacy_vnc_dir}"
+    )
+
+    run(
+        f"cp {vnc_dir}/passwd {legacy_vnc_dir}/passwd"
+    )
+
+    run(
+        f"chmod 600 {legacy_vnc_dir}/passwd"
+    )
+
 
     # Two fixes here, both needed for the desktop session to survive on
     # TigerVNC, whichever UI was chosen:
@@ -530,15 +556,24 @@ exec dbus-launch --exit-with-session {session_cmd}
     # out lets vncserver fall back to the default xstartup file, which
     # already runs the chosen desktop session correctly.
     #
+    # FIX: -rfbauth <path> + -SecurityTypes VncAuth explicitly tell
+    # Xvnc which password file to authenticate against, so it never
+    # falls back to its own interactive password prompt (the crash
+    # this whole block exists to prevent) -- whichever of the two
+    # passwd file locations this TigerVNC build actually expects,
+    # this pins it down instead of leaving it to guess.
+    #
     # Running vncserver directly as root (no `su`) is what makes
     # "ALL IN ROOT" possible -- TigerVNC and both desktop UIs work
     # fine as root, they just normally aren't run that way.
     run(
-        """
+        f"""
 vncserver :1 \
 -localhost no \
 -geometry 1920x1080 \
--depth 24
+-depth 24 \
+-rfbauth {vnc_dir}/passwd \
+-SecurityTypes VncAuth
 """
     )
 
@@ -555,6 +590,26 @@ vncserver :1 \
             f"{HOME}/.config/tigervnc/*:1.log",
         ]
     )
+
+    # FIX: sanity-check that Xvnc actually came up. The vncserver
+    # launch above is fatal=True by default so a hard failure already
+    # stops the script -- but vncserver can also exit 0 while Xvnc
+    # itself dies moments later (e.g. bad xstartup, missing D-Bus).
+    # Catching that here, right after setup, is much cheaper than
+    # debugging a broken noVNC/Sunshine tunnel pointed at a desktop
+    # that was never actually running.
+    check = run(
+        "pgrep -f Xtigervnc",
+        silent=True,
+        fatal=False
+    )
+
+    if not check:
+        out(
+            "[VNC] WARNING: Xtigervnc does not appear to be running "
+            "after startup -- check ~/.vnc/*:1.log or "
+            "~/.config/tigervnc/*:1.log for the actual crash reason."
+        )
 
 
 
