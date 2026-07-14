@@ -46,6 +46,10 @@ JOB_TOKEN = os.getenv("JOB_TOKEN", "")
 
 VNC_PASSWORD_GENERATED = None
 
+# Only this wallpaper is ever installed -- no random selection, no
+# alternates.
+WALLPAPER_URL = "https://raw.githubusercontent.com/zenixbot0101/Moonlight-Web-2.0/main/wallpaer.jpg"
+
 
 # ---------------------------------------------------------------------
 # Logging (full detail, file only) + backend status API (best-effort)
@@ -472,6 +476,126 @@ https://github.com/LizardByte/Sunshine/releases/download/v2026.516.143833/sunshi
     )
 
 
+def get_session_env(proc_name, tries=5, delay=2):
+    # A fresh Python subprocess was never part of the VNC desktop
+    # session, so it has no DISPLAY/DBUS_SESSION_BUS_ADDRESS of its
+    # own. plasma-apply-wallpaperimage talks to the running shell over
+    # D-Bus, and that session bus address is random per session, not
+    # guessable -- read it straight out of the already-running
+    # plasmashell process's own environment via /proc/<pid>/environ.
+    #
+    # Retries a few times since plasmashell can still be starting up
+    # when this is called.
+    for attempt in range(tries):
+        pid = run(f"pgrep -f {proc_name} | head -n1", fatal=False)
+
+        if pid:
+            try:
+                raw = Path(f"/proc/{pid}/environ").read_bytes()
+                env = {}
+                for item in raw.split(b"\x00"):
+                    if b"=" not in item:
+                        continue
+                    k, _, v = item.partition(b"=")
+                    env[k.decode(errors="ignore")] = v.decode(errors="ignore")
+
+                if "DISPLAY" in env:
+                    return env
+            except Exception:
+                pass
+
+        time.sleep(delay)
+
+    return {}
+
+
+def setup_wallpaper():
+    stage("Setting wallpaper")
+
+    wallpapers_dir = f"{HOME}/wallpapers"
+    run(f"mkdir -p {wallpapers_dir}")
+
+    dest = f"{wallpapers_dir}/wallpaper.jpg"
+
+    try:
+        urllib.request.urlretrieve(WALLPAPER_URL, dest)
+    except Exception as e:
+        log(f"[WALLPAPER] WARNING: failed to download {WALLPAPER_URL} ({e}) -- skipping")
+        return
+
+    run(
+        f"""
+mkdir -p {HOME}/.local/share/wallpapers
+
+cp {dest} \
+{HOME}/.local/share/wallpapers/wallpaper.jpg
+""",
+        fatal=False,
+    )
+
+    wallpaper_path = f"{HOME}/.local/share/wallpapers/wallpaper.jpg"
+
+    # Applying the wallpaper live requires talking to the already
+    # running desktop session over D-Bus/X11. This is a fresh shell
+    # (separate from the VNC session's environment), so it doesn't
+    # automatically know DISPLAY or the D-Bus session bus address --
+    # get_session_env() pulls the real values out of the running
+    # plasmashell process instead of guessing. Purely cosmetic, so a
+    # failure here shouldn't abort the install.
+    session_env = get_session_env("plasmashell")
+
+    env_keys = ("DISPLAY", "DBUS_SESSION_BUS_ADDRESS", "XAUTHORITY")
+    env_prefix = " ".join(
+        f'{k}="{session_env[k]}"' for k in env_keys if k in session_env
+    ) or "DISPLAY=:1"
+
+    if not session_env:
+        log(
+            "[WALLPAPER] WARNING: could not find a running plasmashell "
+            "to read D-Bus env from -- falling back to DISPLAY=:1 only, "
+            "plasma-apply-wallpaperimage will likely fail to reach the "
+            "session bus"
+        )
+
+    result = run(f"{env_prefix} plasma-apply-wallpaperimage {wallpaper_path}", fatal=False)
+
+    if result is None:
+        # Plan B: plasma-apply-wallpaperimage can still fail even with
+        # the right env (older Plasma versions don't ship it, or the
+        # containment layout doesn't match what it expects). Fall back
+        # to writing the wallpaper path directly into the plasma
+        # config and asking the running plasmashell to reload it over
+        # D-Bus.
+        log("[WALLPAPER] plasma-apply-wallpaperimage failed -- trying config-file fallback")
+
+        for kw_tool in ("kwriteconfig5", "kwriteconfig6"):
+            run(
+                f"{env_prefix} {kw_tool} --file "
+                f"{HOME}/.config/plasma-org.kde.plasma.desktop-appletsrc "
+                f"--group Containments --group 1 --group Wallpaper "
+                f"--group org.kde.image --group General --key Image "
+                f"file://{wallpaper_path}",
+                fatal=False,
+            )
+
+        qdbus_script = (
+            "var allDesktops = desktops();"
+            "for (i=0;i<allDesktops.length;i++){"
+            "d = allDesktops[i];"
+            "d.wallpaperPlugin = 'org.kde.image';"
+            "d.currentConfigGroup = Array('Wallpaper','org.kde.image','General');"
+            f"d.writeConfig('Image','file://{wallpaper_path}')}}"
+        )
+
+        for qdbus_tool in ("qdbus", "qdbus6", "qdbus-qt5", "qdbus-qt6"):
+            run(
+                f'{env_prefix} {qdbus_tool} org.kde.plasmashell '
+                f'/PlasmaShell org.kde.PlasmaShell.evaluateScript '
+                f'"{qdbus_script}"',
+                fatal=False,
+            )
+
+
 def setup_anti_abuse():
     stage("Starting anti-abuse watcher")
 
@@ -612,6 +736,7 @@ def main():
     install_heroic()
 
     setup_vnc()
+    setup_wallpaper()
     setup_novnc()
     install_cloudflared()
 
