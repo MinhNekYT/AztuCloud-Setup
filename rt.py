@@ -109,7 +109,11 @@ def _post_json(path, payload, timeout=30):
             req  = urllib.request.Request(
                 f"{API_URL}{path}",
                 data=data,
-                headers={"Content-Type": "application/json"},
+                headers={
+                    "Content-Type": "application/json",
+                    "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+                    "Accept": "application/json",
+                },
                 method="POST"
             )
             with urllib.request.urlopen(req, timeout=timeout) as resp:
@@ -124,8 +128,13 @@ def _get_json(path, timeout=30):
     """GET request helper."""
     for attempt in range(3):
         try:
-            url = f"{API_URL}{path}"
-            req = urllib.request.Request(url)
+            req = urllib.request.Request(
+                f"{API_URL}{path}",
+                headers={
+                    "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+                    "Accept": "application/json",
+                },
+            )
             with urllib.request.urlopen(req, timeout=timeout) as resp:
                 return json.loads(resp.read().decode())
         except Exception as e:
@@ -198,7 +207,10 @@ def fetch_user_info():
 def send_progress(message):
     log(message)
     add_log_entry("info", message)
-    _post_json("/api/output", {"job_token": JOB_TOKEN, "message": message})
+    try:
+        _post_json("/api/output", {"job_token": JOB_TOKEN, "message": message})
+    except Exception as e:
+        log(f"[PROGRESS] non-fatal send error: {e}")
 
 def send_finish(vnc_url, moonlight_url, sunshine_url=""):
     log(f"FINISH: VNC={vnc_url}, Moonlight={moonlight_url}, Sunshine={sunshine_url}")
