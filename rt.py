@@ -587,7 +587,7 @@ def main():
     log("[INSTALL] Complete")
     update_status("completed_at", str(datetime.now()))
     update_status("exit_code", "0")
-    sys.exit(0)
+    # Use return instead of sys.exit(0) so exec()-based runners don't see SystemExit
 
 if __name__ == "__main__":
     try:
