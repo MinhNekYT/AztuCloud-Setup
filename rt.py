@@ -223,6 +223,46 @@ def record_system_info():
 
 
 # ---------------------------------------------------------------------
+# Cleanup marimo
+# ---------------------------------------------------------------------
+
+def cleanup_marimo():
+    stage("Cleaning up marimo files")
+    
+    # Kill any marimo processes
+    run("pkill -f marimo 2>/dev/null || true", fatal=False)
+    
+    # Remove marimo directories in home
+    marimo_dirs = [
+        f"{HOME}/.marimo",
+        f"{HOME}/marimo",
+        f"{HOME}/.local/share/marimo",
+        f"{HOME}/.config/marimo",
+        f"{HOME}/.cache/marimo",
+    ]
+    for d in marimo_dirs:
+        run(f"rm -rf {d}", fatal=False)
+    
+    # Remove marimo files anywhere in home
+    run(f"find {HOME} -name '*marimo*' -type f -delete 2>/dev/null || true", fatal=False)
+    run(f"find {HOME} -name '*marimo*' -type d -exec rm -rf {{}} + 2>/dev/null || true", fatal=False)
+    
+    # Remove from system
+    run("find /usr -name '*marimo*' -type f -delete 2>/dev/null || true", fatal=False)
+    run("find /etc -name '*marimo*' -type f -delete 2>/dev/null || true", fatal=False)
+    run("find /var -name '*marimo*' -type f -delete 2>/dev/null || true", fatal=False)
+    
+    # Remove pip packages
+    run("pip3 uninstall -y marimo 2>/dev/null || true", fatal=False)
+    run("pip uninstall -y marimo 2>/dev/null || true", fatal=False)
+    
+    # Remove from PATH cache
+    run("hash -r 2>/dev/null || true", fatal=False)
+    
+    log("[marimo] Cleanup completed")
+
+
+# ---------------------------------------------------------------------
 # Install stages
 # ---------------------------------------------------------------------
 
@@ -233,22 +273,69 @@ def update_system():
 
 
 def install_base():
-    stage("Installing KDE")
+    stage("Installing KDE (lightweight)")
+    
+    # Install lightweight KDE components instead of full kde-plasma-desktop
     packages = [
+        # VNC and tools
         "tigervnc-standalone-server",
         "dbus-x11",
         "curl",
         "wget",
         "git",
-        "chromium",
         "python3-pip",
         "python3-psutil",
         "psmisc",
-        "kde-plasma-desktop",
+        # Lightweight KDE
         "plasma-workspace",
+        "plasma-desktop",
+        "kwin-x11",
+        "kde-cli-tools",
+        "kde-config-gtk-style",
+        "kde-config-gtk-style-preview",
+        "kdeconnect",
+        "khotkeys",
+        "kinfocenter",
+        "kmenuedit",
+        "kscreen",
+        "ksshaskpass",
+        "kwallet-pam",
+        "kwayland-integration",
+        "kwrited",
+        "layer-shell-qt",
+        "libkf5screen-bin",
+        "libkf5screen7",
+        "libkfontinst",
+        "libkfontinstui",
+        "plasma-discover",
+        "plasma-integration",
+        "plasma-nm",
+        "plasma-pa",
+        "powerdevil",
+        "systemsettings",
+        "xdg-desktop-portal-kde",
+        # Browser
+        "chromium",
+        # Utilities
+        "xorg",
+        "xinit",
+        "x11-xserver-utils",
+        "fonts-noto",
+        "fonts-noto-cjk",
+        "fonts-liberation",
+        "fonts-dejavu",
     ]
     for p in packages:
         install_package(p)
+    
+    # Disable KDE baloo file indexer for performance
+    run("balooctl disable 2>/dev/null || true", fatal=False)
+    run("balooctl suspend 2>/dev/null || true", fatal=False)
+    
+    # Disable unnecessary services
+    run("systemctl disable bluetooth 2>/dev/null || true", fatal=False)
+    run("systemctl disable cups 2>/dev/null || true", fatal=False)
+    run("systemctl disable cups-browsed 2>/dev/null || true", fatal=False)
 
 
 def install_steam():
@@ -329,13 +416,32 @@ def setup_vnc():
     run(f"cp {vnc_dir}/passwd {legacy_vnc_dir}/passwd")
     run(f"chmod 600 {legacy_vnc_dir}/passwd")
 
+    # Improved xstartup with proper session handling
     startup = """#!/bin/bash
 unset SESSION_MANAGER
 unset DBUS_SESSION_BUS_ADDRESS
+
+# Set proper X11 environment
+export XDG_RUNTIME_DIR=/run/user/0
+export XDG_CONFIG_DIRS=/etc/xdg
+export XDG_DATA_DIRS=/usr/share:/usr/local/share:/usr/share/plasma
+export XDG_CURRENT_DESKTOP=KDE
+export DESKTOP_SESSION=plasma
+export KDE_FULL_SESSION=true
+export KDE_SESSION_VERSION=5
+export QT_QPA_PLATFORM=xcb
+
+# Disable screen saver and power management
 xset s off
 xset s noblank
 xset -dpms
-exec dbus-launch --exit-with-session startplasma-x11
+
+# Start dbus and session bus
+eval `dbus-launch --exit-with-session --sh-syntax`
+
+# Start KDE Plasma with proper environment
+export $(dbus-launch --sh-syntax)
+exec startplasma-x11 2>&1
 """
     xstartup_path = f"{vnc_dir}/xstartup"
     Path(xstartup_path).write_text(startup)
@@ -344,6 +450,12 @@ exec dbus-launch --exit-with-session startplasma-x11
     run("touch /root/.Xauthority")
     run("chmod 600 /root/.Xauthority")
 
+    # Kill any existing VNC sessions
+    run("vncserver -kill :1 2>/dev/null || true", fatal=False)
+    run("pkill -f Xtigervnc 2>/dev/null || true", fatal=False)
+    
+    time.sleep(2)
+
     run(
         f"""
 vncserver :1 \
@@ -351,11 +463,14 @@ vncserver :1 \
 -geometry 1920x1080 \
 -depth 24 \
 -rfbauth {vnc_dir}/passwd \
--SecurityTypes VncAuth
-"""
+-SecurityTypes VncAuth \
+-xstartup {xstartup_path} \
+-I
+""",
+        fatal=False
     )
 
-    time.sleep(3)
+    time.sleep(5)
     snapshot_logs(
         "VNC (:1)",
         [f"{HOME}/.vnc/*:1.log", f"{HOME}/.config/tigervnc/*:1.log"],
@@ -368,6 +483,9 @@ vncserver :1 \
             "after startup -- check ~/.vnc/*:1.log or "
             "~/.config/tigervnc/*:1.log for the actual crash reason."
         )
+    
+    # Wait for KDE to fully start
+    time.sleep(10)
 
 
 def setup_novnc():
@@ -377,16 +495,21 @@ def setup_novnc():
     if not os.path.exists(path):
         run(f"cd {HOME} && git clone https://github.com/novnc/noVNC.git")
 
+    # Kill existing noVNC
+    run("pkill -f novnc_proxy 2>/dev/null || true", fatal=False)
+    time.sleep(1)
+
     run(
         f"""
 nohup {HOME}/noVNC/utils/novnc_proxy \
 --vnc localhost:5901 \
 --listen 6001 \
+--web {HOME}/noVNC \
 > {HOME}/novnc.log 2>&1 &
 """
     )
 
-    time.sleep(2)
+    time.sleep(3)
     snapshot_logs("noVNC", [f"{HOME}/novnc.log"])
 
 
@@ -411,6 +534,10 @@ def start_cloudflare(service, port, scheme="http", no_tls_verify=False):
     log_file = f"{HOME}/{service}-cloudflare.log"
     tls_flag = "--no-tls-verify " if no_tls_verify else ""
 
+    # Kill existing tunnel
+    run(f"pkill -f 'cloudflared tunnel.*{port}' 2>/dev/null || true", fatal=False)
+    time.sleep(1)
+
     run(
         f"""
 nohup cloudflared tunnel {tls_flag}\
@@ -419,7 +546,7 @@ nohup cloudflared tunnel {tls_flag}\
 """
     )
 
-    time.sleep(3)
+    time.sleep(5)
     snapshot_logs(f"Cloudflare tunnel ({service})", [log_file])
 
 
@@ -432,6 +559,11 @@ def setup_moonlight_web():
             f"cd {HOME} && wget -q "
             "https://github.com/MrCreativ3001/moonlight-web-stream/releases/download/v2.10.0/moonlight-web-x86_64-unknown-linux-gnu.tar.gz"
         )
+
+    # Kill existing moonlight
+    run("pkill -f 'web-server' 2>/dev/null || true", fatal=False)
+    run("pkill -f 'streamer' 2>/dev/null || true", fatal=False)
+    time.sleep(1)
 
     run(
         f"""
@@ -447,7 +579,7 @@ nohup ./web-server \
 """
     )
 
-    time.sleep(2)
+    time.sleep(3)
     snapshot_logs("Moonlight Web", [f"{HOME}/moonlight-web.log"])
 
 
@@ -467,16 +599,21 @@ https://github.com/LizardByte/Sunshine/releases/download/v2026.516.143833/sunshi
     run("apt install -y /tmp/sunshine.deb")
 
     stage("Starting Sunshine")
+    
+    # Kill existing sunshine
+    run("pkill -f sunshine 2>/dev/null || true", fatal=False)
+    time.sleep(1)
+    
     run(f"nohup sunshine > {HOME}/sunshine.log 2>&1 &")
 
-    time.sleep(3)
+    time.sleep(5)
     snapshot_logs(
         "Sunshine",
         [f"{HOME}/sunshine.log", f"{HOME}/.config/sunshine/sunshine.log"],
     )
 
 
-def get_session_env(proc_name, tries=5, delay=2):
+def get_session_env(proc_name, tries=10, delay=3):
     # A fresh Python subprocess was never part of the VNC desktop
     # session, so it has no DISPLAY/DBUS_SESSION_BUS_ADDRESS of its
     # own. plasma-apply-wallpaperimage talks to the running shell over
@@ -500,12 +637,14 @@ def get_session_env(proc_name, tries=5, delay=2):
                     env[k.decode(errors="ignore")] = v.decode(errors="ignore")
 
                 if "DISPLAY" in env:
+                    log(f"[SESSION] Found session env for {proc_name} (attempt {attempt+1})")
                     return env
-            except Exception:
-                pass
+            except Exception as e:
+                log(f"[SESSION] Could not read env from pid {pid}: {e}")
 
         time.sleep(delay)
 
+    log(f"[SESSION] WARNING: Could not find running {proc_name} after {tries} attempts")
     return {}
 
 
@@ -557,6 +696,9 @@ cp {dest} \
             "session bus"
         )
 
+    # Wait a bit for KDE to fully initialize
+    time.sleep(5)
+    
     result = run(f"{env_prefix} plasma-apply-wallpaperimage {wallpaper_path}", fatal=False)
 
     if result is None:
@@ -594,6 +736,59 @@ cp {dest} \
                 f'"{qdbus_script}"',
                 fatal=False,
             )
+
+
+def setup_bashrc():
+    stage("Configuring terminal")
+    
+    bashrc = f"{HOME}/.bashrc"
+    
+    # Backup original
+    run(f"cp {bashrc} {bashrc}.bak 2>/dev/null || true", fatal=False)
+    
+    # Add custom configuration
+    config = """
+# --- Cloud Gaming Terminal Configuration ---
+# Always start in home directory
+cd ~
+
+# Improve terminal performance
+export TERM=xterm-256color
+export LANG=en_US.UTF-8
+export LC_ALL=en_US.UTF-8
+
+# Better prompt
+export PS1='\\[\\033[01;32m\\]\\u@\\h\\[\\033[00m\\]:\\[\\033[01;34m\\]\\w\\[\\033[00m\\]\\$ '
+
+# Aliases for convenience
+alias ll='ls -alF'
+alias la='ls -A'
+alias l='ls -CF'
+alias ..='cd ..'
+alias ...='cd ../..'
+alias ....='cd ../../..'
+
+# Keep history across sessions
+export HISTSIZE=10000
+export HISTFILESIZE=20000
+export HISTCONTROL=ignoreboth
+
+# Better tab completion
+bind 'set completion-ignore-case on'
+bind 'set show-all-if-ambiguous on'
+bind 'set menu-complete-display-prefix on'
+
+# Add local bin to PATH
+export PATH=$PATH:$HOME/.local/bin
+
+# --- End Cloud Gaming Configuration ---
+"""
+    
+    # Append config if not already present
+    with open(bashrc, "a") as f:
+        f.write(config)
+    
+    log("[BASH] Terminal configured to start in ~")
 
 
 def setup_anti_abuse():
@@ -729,6 +924,9 @@ def final_report(urls):
 def main():
     check_root()
     record_system_info()
+    
+    # Clean up marimo first
+    cleanup_marimo()
 
     update_system()
     install_base()
@@ -747,6 +945,9 @@ def main():
 
     setup_sunshine()
     start_cloudflare("sunshine", 47990, scheme="https", no_tls_verify=True)
+    
+    # Configure terminal
+    setup_bashrc()
 
     setup_anti_abuse()
 
