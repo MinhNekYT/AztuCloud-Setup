@@ -106,7 +106,21 @@ def _post_json(path, payload, timeout=30):
     for attempt in range(3):
         try:
             data = json.dumps(payload).encode()
-            req  = urllib.request.Request(
+            # Try requests first (better TLS fingerprint, passes Cloudflare)
+            try:
+                import requests as _req
+                resp = _req.post(
+                    f"{API_URL}{path}", json=payload, timeout=timeout,
+                    headers={
+                        "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+                        "Accept": "application/json",
+                    }
+                )
+                return resp.json()
+            except ImportError:
+                pass
+            # Fallback: urllib
+            req = urllib.request.Request(
                 f"{API_URL}{path}",
                 data=data,
                 headers={
@@ -128,6 +142,18 @@ def _get_json(path, timeout=30):
     """GET request helper."""
     for attempt in range(3):
         try:
+            try:
+                import requests as _req
+                resp = _req.get(
+                    f"{API_URL}{path}", timeout=timeout,
+                    headers={
+                        "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+                        "Accept": "application/json",
+                    }
+                )
+                return resp.json()
+            except ImportError:
+                pass
             req = urllib.request.Request(
                 f"{API_URL}{path}",
                 headers={
