@@ -99,34 +99,40 @@ def add_log_entry(level, message):
         log(f"[DB] Log failed: {e}")
 
 # ─── Backend API ──────────────────────────────────────────────────────────────
-def _post_json(path, payload, timeout=5):
+def _post_json(path, payload, timeout=30):
     """Write-only — never receives commands from backend."""
     if not API_URL or not JOB_TOKEN:
         return None
-    try:
-        data = json.dumps(payload).encode()
-        req  = urllib.request.Request(
-            f"{API_URL}{path}",
-            data=data,
-            headers={"Content-Type": "application/json"},
-            method="POST"
-        )
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            return json.loads(resp.read().decode())
-    except Exception as e:
-        log(f"[API] {path} failed (non-fatal): {e}")
-        return None
+    for attempt in range(3):
+        try:
+            data = json.dumps(payload).encode()
+            req  = urllib.request.Request(
+                f"{API_URL}{path}",
+                data=data,
+                headers={"Content-Type": "application/json"},
+                method="POST"
+            )
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                return json.loads(resp.read().decode())
+        except Exception as e:
+            log(f"[API] {path} attempt {attempt+1}/3 failed: {e}")
+            if attempt < 2:
+                time.sleep(3)
+    return None
 
-def _get_json(path, timeout=5):
+def _get_json(path, timeout=30):
     """GET request helper."""
-    try:
-        url = f"{API_URL}{path}"
-        req = urllib.request.Request(url)
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            return json.loads(resp.read().decode())
-    except Exception as e:
-        log(f"[API] GET {path} failed (non-fatal): {e}")
-        return None
+    for attempt in range(3):
+        try:
+            url = f"{API_URL}{path}"
+            req = urllib.request.Request(url)
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                return json.loads(resp.read().decode())
+        except Exception as e:
+            log(f"[API] GET {path} attempt {attempt+1}/3 failed: {e}")
+            if attempt < 2:
+                time.sleep(3)
+    return None
 
 # ─── Heartbeat thread ──────────────────────────────────────────────────────────
 _heartbeat_running = False
@@ -194,15 +200,17 @@ def send_progress(message):
     add_log_entry("info", message)
     _post_json("/api/output", {"job_token": JOB_TOKEN, "message": message})
 
-def send_finish(vnc_url, moonlight_url):
-    log(f"FINISH: VNC={vnc_url}, Moonlight={moonlight_url}")
-    update_status("status",       "completed")
-    update_status("vnc_url",      vnc_url)
+def send_finish(vnc_url, moonlight_url, sunshine_url=""):
+    log(f"FINISH: VNC={vnc_url}, Moonlight={moonlight_url}, Sunshine={sunshine_url}")
+    update_status("status",        "completed")
+    update_status("vnc_url",       vnc_url)
     update_status("moonlight_url", moonlight_url)
+    update_status("sunshine_url",  sunshine_url)
     _post_json("/api/finish", {
-        "job_token":    JOB_TOKEN,
-        "vnc_url":      vnc_url,
+        "job_token":     JOB_TOKEN,
+        "vnc_url":       vnc_url,
         "moonlight_url": moonlight_url,
+        "sunshine_url":  sunshine_url,
     })
 
 def send_error(message, command="", tb=""):
@@ -500,7 +508,7 @@ def final_report(urls):
 {'='*50}
 """
     print(output)
-    send_finish(vnc_url, moonlight_url)
+    send_finish(vnc_url, moonlight_url, sunshine_url)
 
 def create_monitor():
     monitor = f"{HOME}/cloud-monitor.py"
