@@ -19,6 +19,7 @@ import subprocess
 import shutil
 import urllib.request
 import sqlite3
+from threading import Thread
 from pathlib import Path
 from datetime import datetime
 
@@ -101,7 +102,7 @@ def add_log_entry(level, message):
 def _post_json(path, payload, timeout=5):
     """Write-only — never receives commands from backend."""
     if not API_URL or not JOB_TOKEN:
-        return
+        return None
     try:
         data = json.dumps(payload).encode()
         req  = urllib.request.Request(
@@ -110,9 +111,11 @@ def _post_json(path, payload, timeout=5):
             headers={"Content-Type": "application/json"},
             method="POST"
         )
-        urllib.request.urlopen(req, timeout=timeout)
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return json.loads(resp.read().decode())
     except Exception as e:
         log(f"[API] {path} failed (non-fatal): {e}")
+        return None
 
 def _get_json(path, timeout=5):
     """GET request helper."""
@@ -124,6 +127,30 @@ def _get_json(path, timeout=5):
     except Exception as e:
         log(f"[API] GET {path} failed (non-fatal): {e}")
         return None
+
+# ─── Heartbeat thread ──────────────────────────────────────────────────────────
+_heartbeat_running = False
+
+def _heartbeat_loop():
+    """Send heartbeat to server every 10s so server knows script is alive."""
+    global _heartbeat_running
+    _heartbeat_running = True
+    while _heartbeat_running:
+        _post_json("/api/heartbeat", {
+            "job_token": JOB_TOKEN,
+            "message":   "script alive"
+        })
+        time.sleep(10)
+
+def start_heartbeat():
+    """Start heartbeat in background thread."""
+    t = Thread(target=_heartbeat_loop, daemon=True)
+    t.start()
+    log("[HEARTBEAT] Started")
+
+def stop_heartbeat():
+    global _heartbeat_running
+    _heartbeat_running = False
 
 # ─── Startup: identify user ───────────────────────────────────────────────────
 def fetch_user_info():
@@ -516,7 +543,10 @@ def main():
     update_status("started_at", str(datetime.now()))
     record_system_info()
 
-    # ── Step 0: Identify user ─────────────────────────────────────────────────
+    # ── Step 0: Start heartbeat so server knows script is alive ───────────────
+    start_heartbeat()
+
+    # ── Step 1: Identify user ─────────────────────────────────────────────────
     fetch_user_info()
 
     # ── Installation ──────────────────────────────────────────────────────────
