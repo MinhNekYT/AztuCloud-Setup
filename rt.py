@@ -371,20 +371,30 @@ def install_heroic():
     if os.path.exists(deb):
         run(f"DEBIAN_FRONTEND=noninteractive apt install -y {deb}", fatal=False)
 
+USER_HOME = f"/home/{DEFAULT_USER}"
+
+def _su(cmd: str, fatal=True):
+    """Run a command as DEFAULT_USER via su -c."""
+    escaped = cmd.replace("'", "'\\''")
+    return run(f"su - {DEFAULT_USER} -c '{escaped}'", fatal=fatal)
+
 def setup_vnc():
     send_progress("Starting VNC")
-    vnc_dir = f"{HOME}/.config/tigervnc"
-    run(f"rm -rf {HOME}/.vnc {vnc_dir}")
-    run(f"mkdir -p {vnc_dir}")
-    global VNC_PASSWORD_GENERATED
-    pw = os.environ.get("VNC_PASSWORD","").strip() or "123456"
-    VNC_PASSWORD_GENERATED = pw
-    run(f"vncpasswd -f > {vnc_dir}/passwd", input_data=pw+"\n")
-    run(f"chmod 600 {vnc_dir}/passwd")
-    run(f"mkdir -p {HOME}/.vnc")
-    run(f"cp {vnc_dir}/passwd {HOME}/.vnc/passwd")
-    run(f"chmod 600 {HOME}/.vnc/passwd")
-    session_cmd = "startxfce4" if UI=="xfce" else "startplasma-x11"
+    vnc_dir  = f"{USER_HOME}/.config/tigervnc"
+    vnc_dir2 = f"{USER_HOME}/.vnc"
+    pw = DEFAULT_PASSWORD
+
+    # Create dirs as user
+    _su(f"mkdir -p {vnc_dir} {vnc_dir2}", fatal=False)
+
+    # Set VNC password
+    _su(f"echo '{pw}' | vncpasswd -f > {vnc_dir}/passwd")
+    _su(f"chmod 600 {vnc_dir}/passwd")
+    _su(f"cp {vnc_dir}/passwd {vnc_dir2}/passwd", fatal=False)
+    _su(f"chmod 600 {vnc_dir2}/passwd", fatal=False)
+
+    # Write xstartup
+    session_cmd = "startxfce4" if UI == "xfce" else "startplasma-x11"
     startup = f"""#!/bin/bash
 unset SESSION_MANAGER
 unset DBUS_SESSION_BUS_ADDRESS
@@ -393,38 +403,47 @@ exec dbus-launch --exit-with-session {session_cmd}
 """
     xstartup = f"{vnc_dir}/xstartup"
     Path(xstartup).write_text(startup)
+    run(f"chown {DEFAULT_USER}:{DEFAULT_USER} {xstartup}")
     run(f"chmod +x {xstartup}")
-    run("touch /root/.Xauthority; chmod 600 /root/.Xauthority")
-    run(f"vncserver :1 -localhost no -geometry 1920x1080 -depth 24 -rfbauth {vnc_dir}/passwd -SecurityTypes VncAuth")
+
+    # Ensure .Xauthority owned by user
+    run(f"touch {USER_HOME}/.Xauthority")
+    run(f"chown {DEFAULT_USER}:{DEFAULT_USER} {USER_HOME}/.Xauthority")
+    run(f"chmod 600 {USER_HOME}/.Xauthority")
+
+    # Start VNC as user
+    _su(f"vncserver :1 -localhost no -geometry 1920x1080 -depth 24 "
+        f"-rfbauth {vnc_dir}/passwd -SecurityTypes VncAuth")
     time.sleep(3)
 
 def disable_screen_lock():
     send_progress("Disabling screen lock")
     if UI == "xfce":
-        for ch,prop,val,vt in [
-            ("xfce4-screensaver","/saver/enabled","false","bool"),
-            ("xfce4-screensaver","/lock/enabled","false","bool"),
-            ("xfce4-power-manager","/xfce4-power-manager/dpms-enabled","false","bool"),
+        for ch, prop, val, vt in [
+            ("xfce4-screensaver", "/saver/enabled",  "false", "bool"),
+            ("xfce4-screensaver", "/lock/enabled",   "false", "bool"),
+            ("xfce4-power-manager", "/xfce4-power-manager/dpms-enabled", "false", "bool"),
         ]:
-            run(f"DISPLAY=:1 xfconf-query -c {ch} -p {prop} --create -t {vt} -s {val}", fatal=False)
-        run("killall light-locker", fatal=False)
+            _su(f"DISPLAY=:1 xfconf-query -c {ch} -p {prop} --create -t {vt} -s {val}", fatal=False)
+        _su("killall light-locker", fatal=False)
     else:
-        for tool in ("kwriteconfig5","kwriteconfig6"):
-            for file,grp,key,val in [
-                ("kscreenlockerrc","Daemon","Autolock","false"),
-                ("kscreenlockerrc","Daemon","Timeout","0"),
+        for tool in ("kwriteconfig5", "kwriteconfig6"):
+            for file, grp, key, val in [
+                ("kscreenlockerrc", "Daemon", "Autolock", "false"),
+                ("kscreenlockerrc", "Daemon", "Timeout",  "0"),
             ]:
-                run(f"{tool} --file {file} --group {grp} --key {key} {val}", fatal=False)
+                _su(f"{tool} --file {file} --group {grp} --key {key} {val}", fatal=False)
 
 def setup_shell():
-    run(f"echo 'cd ~' >> {HOME}/.bash_profile", fatal=False)
+    _su(f"echo 'cd ~' >> {USER_HOME}/.bash_profile", fatal=False)
 
 def setup_novnc():
     send_progress("Starting noVNC")
-    p = f"{HOME}/noVNC"
-    if not os.path.exists(p):
-        run(f"cd {HOME} && git clone https://github.com/novnc/noVNC.git")
-    run(f"nohup {HOME}/noVNC/utils/novnc_proxy --vnc localhost:5901 --listen 6001 > {HOME}/novnc.log 2>&1 &")
+    novnc_dir = f"{USER_HOME}/noVNC"
+    if not os.path.exists(novnc_dir):
+        _su(f"git clone https://github.com/novnc/noVNC.git {novnc_dir}")
+    log_file = f"{USER_HOME}/novnc.log"
+    _su(f"nohup {novnc_dir}/utils/novnc_proxy --vnc localhost:5901 --listen 6001 > {log_file} 2>&1 &")
     time.sleep(2)
 
 def install_cloudflared():
@@ -434,17 +453,19 @@ def install_cloudflared():
 
 def start_cloudflare(service, port, scheme="http", no_tls_verify=False):
     send_progress(f"Cloudflare tunnel: {service}")
-    log_file = f"{HOME}/{service}-cloudflare.log"
+    log_file = f"{USER_HOME}/{service}-cloudflare.log"
     tls = "--no-tls-verify " if no_tls_verify else ""
-    run(f"nohup cloudflared tunnel {tls}--url {scheme}://localhost:{port} > {log_file} 2>&1 &")
+    _su(f"nohup cloudflared tunnel {tls}--url {scheme}://localhost:{port} > {log_file} 2>&1 &")
     time.sleep(3)
 
 def setup_moonlight_web():
     send_progress("Starting Moonlight Web")
-    pkg = f"{HOME}/moonlight-web-x86_64-unknown-linux-gnu.tar.gz"
+    pkg = f"{USER_HOME}/moonlight-web-x86_64-unknown-linux-gnu.tar.gz"
     if not os.path.exists(pkg):
-        run(f"cd {HOME} && wget -q https://github.com/MrCreativ3001/moonlight-web-stream/releases/download/v2.10.0/moonlight-web-x86_64-unknown-linux-gnu.tar.gz")
-    run(f"cd {HOME} && tar -xzf moonlight-web-x86_64-unknown-linux-gnu.tar.gz && cd {HOME}/package && chmod +x web-server streamer && nohup ./web-server --bind-address 127.0.0.1:8081 > {HOME}/moonlight-web.log 2>&1 &")
+        _su(f"wget -q https://github.com/MrCreativ3001/moonlight-web-stream/releases/download/v2.10.0/moonlight-web-x86_64-unknown-linux-gnu.tar.gz -O {pkg}")
+    _su(f"cd {USER_HOME} && tar -xzf moonlight-web-x86_64-unknown-linux-gnu.tar.gz")
+    _su(f"chmod +x {USER_HOME}/package/web-server {USER_HOME}/package/streamer", fatal=False)
+    _su(f"nohup {USER_HOME}/package/web-server --bind-address 127.0.0.1:8081 > {USER_HOME}/moonlight-web.log 2>&1 &")
     time.sleep(2)
 
 def setup_sunshine():
@@ -453,22 +474,23 @@ def setup_sunshine():
     if not os.path.exists(deb):
         run("wget -q https://github.com/LizardByte/Sunshine/releases/download/v2026.516.143833/sunshine-debian-trixie-amd64.deb -O /tmp/sunshine.deb")
     run("apt install -y /tmp/sunshine.deb")
-    run(f"nohup sunshine > {HOME}/sunshine.log 2>&1 &")
+    _su(f"nohup sunshine > {USER_HOME}/sunshine.log 2>&1 &")
     time.sleep(3)
 
 def setup_wallpaper():
     send_progress("Setting wallpaper")
-    dest = f"{HOME}/wallpapers/wallpaper.jpg"
-    run(f"mkdir -p {HOME}/wallpapers", fatal=False)
+    dest = f"{USER_HOME}/wallpapers/wallpaper.jpg"
+    _su(f"mkdir -p {USER_HOME}/wallpapers", fatal=False)
     try:
         urllib.request.urlretrieve(WALLPAPER_URL, dest)
+        run(f"chown {DEFAULT_USER}:{DEFAULT_USER} {dest}", fatal=False)
     except Exception as e:
         log(f"[WALLPAPER] Failed: {e}"); return
-    run(f"mkdir -p {HOME}/.local/share/wallpapers && cp {dest} {HOME}/.local/share/wallpapers/wallpaper.jpg", fatal=False)
+    _su(f"mkdir -p {USER_HOME}/.local/share/wallpapers && cp {dest} {USER_HOME}/.local/share/wallpapers/wallpaper.jpg", fatal=False)
 
 def setup_anti_abuse():
     send_progress("Starting anti-abuse watcher")
-    watcher = f"{HOME}/anti_abuse.py"
+    watcher = f"{USER_HOME}/anti_abuse.py"
     code = r'''
 import psutil, time, subprocess, os
 from datetime import datetime
@@ -515,8 +537,9 @@ while True:
     except Exception as e: _log(f"error: {e}"); time.sleep(15)
 '''
     Path(watcher).write_text(code)
+    run(f"chown {DEFAULT_USER}:{DEFAULT_USER} {watcher}")
     run(f"chmod +x {watcher}")
-    run(f"nohup python3 {watcher} > {HOME}/anti_abuse_stdout.log 2>&1 &")
+    _su(f"nohup python3 {watcher} > {USER_HOME}/anti_abuse_stdout.log 2>&1 &")
     time.sleep(1)
 
 def get_cloudflare_urls():
@@ -529,7 +552,7 @@ def get_cloudflare_urls():
     }
     urls = {}
     for label,(prefix,_) in services.items():
-        path = f"{HOME}/{prefix}-cloudflare.log"
+        path = f"{USER_HOME}/{prefix}-cloudflare.log"
         if not os.path.exists(path): continue
         m = re.search(r"https://[-a-zA-Z0-9]+\.trycloudflare\.com", open(path).read())
         if m: urls[label] = m.group()
@@ -568,7 +591,7 @@ def final_report(urls):
     send_finish(vnc_url, moonlight_url, sunshine_url)
 
 def create_monitor():
-    monitor = f"{HOME}/cloud-monitor.py"
+    monitor = f"{USER_HOME}/cloud-monitor.py"
     Path(monitor).write_text(r'''
 import psutil, time, subprocess, os
 from datetime import datetime
@@ -598,8 +621,9 @@ while True:
     print("\n(Ctrl+C to exit)")
     time.sleep(10)
 ''')
+    run(f"chown {DEFAULT_USER}:{DEFAULT_USER} {monitor}")
     run(f"chmod +x {monitor}")
-    log("[MONITOR] Created at ~/cloud-monitor.py")
+    log(f"[MONITOR] Created at {monitor}")
 
 # ─── Main ─────────────────────────────────────────────────────────────────────
 def main():
@@ -635,9 +659,10 @@ def main():
     setup_anti_abuse()
 
     urls = get_cloudflare_urls()
-    Path(f"{HOME}/.cloudgaming_urls").write_text(
+    Path(f"{USER_HOME}/.cloudgaming_urls").write_text(
         "\n".join(f"{k}|{v}|0|http" for k,v in urls.items())
     )
+    run(f"chown {DEFAULT_USER}:{DEFAULT_USER} {USER_HOME}/.cloudgaming_urls", fatal=False)
     create_monitor()
     final_report(urls)
 
