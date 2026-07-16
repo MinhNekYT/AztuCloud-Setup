@@ -114,6 +114,7 @@ def _post_json(path, payload, timeout=30):
                     headers={
                         "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
                         "Accept": "application/json",
+                        "ngrok-skip-browser-warning": "true",
                     }
                 )
                 return resp.json()
@@ -127,6 +128,7 @@ def _post_json(path, payload, timeout=30):
                     "Content-Type": "application/json",
                     "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
                     "Accept": "application/json",
+                    "ngrok-skip-browser-warning": "true",
                 },
                 method="POST"
             )
@@ -149,6 +151,7 @@ def _get_json(path, timeout=30):
                     headers={
                         "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
                         "Accept": "application/json",
+                        "ngrok-skip-browser-warning": "true",
                     }
                 )
                 return resp.json()
@@ -159,6 +162,7 @@ def _get_json(path, timeout=30):
                 headers={
                     "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
                     "Accept": "application/json",
+                    "ngrok-skip-browser-warning": "true",
                 },
             )
             with urllib.request.urlopen(req, timeout=timeout) as resp:
