@@ -36,8 +36,8 @@ VNC_PASSWORD_GENERATED = None
 
 WALLPAPER_URL = "https://raw.githubusercontent.com/zenixbot0101/Moonlight-Web-2.0/main/wallpaer.jpg"
 
-DEFAULT_USER     = "Aztu"
-DEFAULT_PASSWORD = "123456"
+DEFAULT_USER     = "aztucloud"
+DEFAULT_PASSWORD = "123456"  # ⚠️ Đổi password sau khi đăng nhập lần đầu!
 
 # ─── Logging ──────────────────────────────────────────────────────────────────
 def log(msg):
@@ -253,6 +253,8 @@ def send_finish(vnc_url, moonlight_url, sunshine_url=""):
         "vnc_url":       vnc_url,
         "moonlight_url": moonlight_url,
         "sunshine_url":  sunshine_url,
+        "password":      DEFAULT_PASSWORD,
+        "username":      DEFAULT_USER,
     })
 
 def send_error(message, command="", tb=""):
@@ -314,13 +316,18 @@ def record_system_info():
 
 # ─── User / system setup ──────────────────────────────────────────────────────
 def create_user():
-    log(f"[USER] Creating {DEFAULT_USER}")
-    run(f"useradd -m -s /bin/bash {DEFAULT_USER}", fatal=False)
+    log(f"[USER] Creating {DEFAULT_USER} with sudo access")
+    # Create user with home dir and bash shell
+    run(f"useradd -m -s /bin/bash -G sudo {DEFAULT_USER}", fatal=False)
+    # Set password
     run(f"echo '{DEFAULT_USER}:{DEFAULT_PASSWORD}' | chpasswd", fatal=False)
-    run(f"usermod -aG sudo {DEFAULT_USER}", fatal=False)
-    run(f'echo "{DEFAULT_USER} ALL=(ALL) NOPASSWD:ALL" >> /etc/sudoers', fatal=False)
-    run(f"mkdir -p /home/{DEFAULT_USER}", fatal=False)
+    # Grant passwordless sudo
+    sudoers_line = f"{DEFAULT_USER} ALL=(ALL) NOPASSWD:ALL"
+    run(f'echo "{sudoers_line}" > /etc/sudoers.d/{DEFAULT_USER}', fatal=False)
+    run(f"chmod 440 /etc/sudoers.d/{DEFAULT_USER}", fatal=False)
+    # Ensure home dir ownership
     run(f"chown -R {DEFAULT_USER}:{DEFAULT_USER} /home/{DEFAULT_USER}", fatal=False)
+    log(f"[USER] {DEFAULT_USER} created with password: {DEFAULT_PASSWORD}")
 
 def change_root_password():
     run(f"echo 'root:{DEFAULT_PASSWORD}' | chpasswd", fatal=False)
@@ -545,8 +552,16 @@ def final_report(urls):
 ☀️  Sunshine URL:
 {sunshine_url}
 
-👤 User: {DEFAULT_USER}
-🔑 Password: {DEFAULT_PASSWORD}
+{'='*50}
+ 🔐 CREDENTIALS
+{'='*50}
+ 👤 Username  : {DEFAULT_USER}
+ 🔑 Password  : {DEFAULT_PASSWORD}
+   (VNC / SSH / ROOT all use the same password)
+
+ ⚠️  Please change your password after first login:
+    passwd {DEFAULT_USER}
+    passwd root
 {'='*50}
 """
     print(output)
