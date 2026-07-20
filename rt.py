@@ -1,14 +1,3 @@
-#!/usr/bin/env python3
-# cloudgaming_installer.py
-# KDE/XFCE + VNC + noVNC + Moonlight Web + Sunshine + Cloudflare
-#
-# Provisioning agent for cloud gaming platform.
-# - Fetches user info from backend at startup
-# - Installs and configures services
-# - Reports progress via backend API
-# - Returns service URLs when complete
-# - Exits when done
-
 import os
 import sys
 import time
