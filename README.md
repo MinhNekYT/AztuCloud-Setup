@@ -1,2 +1,3 @@
-# Moonlight-Web-2.0
-Better Moonlight web server
+# AztuCloud Setup
+An script to setup for AztuCloud
+
