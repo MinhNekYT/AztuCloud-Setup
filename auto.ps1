@@ -1,21 +1,6 @@
-<#
-.SYNOPSIS
-    Trình cài đặt NVIDIA Driver tự động cho Windows Server 2019+
-
-.DESCRIPTION
-    1. Xác định đa vùng GCP dựa trên metadata của instance.
-    2. Kiểm tra sự hiện diện của GPU NVIDIA sử dụng PCI Vendor ID (10DE).
-    3. Kiểm tra xem nvidia-smi đã được cài đặt chưa.
-    4. Tải xuống trình cài đặt driver theo vùng cụ thể.
-    5. Cài đặt driver một cách âm thầm.
-    6. Dọn dẹp các tệp cài đặt.
-    7. Cấu hình và khởi động dịch vụ âm thanh (Audiosrv và AudioEndpointBuilder).
-    8. Tải và cài đặt Apollo ở chế độ âm thầm.
-
-.NOTES
-    Chạy script này với quyền Quản trị viên.
-#>
-
+#===============================================
+# Script Cài Đặt NVIDIA Driver & Các Thành Phần Khác
+#===============================================
 $ErrorActionPreference = "Stop"
 
 # --- Kiểm tra quyền Quản trị viên ---
@@ -43,7 +28,195 @@ if (-not $isAdmin) {
 Write-Host "Đã xác nhận quyền Quản trị viên. Tiếp tục..." -ForegroundColor Green
 Write-Host ""
 
-# --- Hằng số & Cấu hình ---
+# --- Tải và cài đặt WinRAR ---
+Write-Host "Bước 1: Tải và cài đặt WinRAR..." -ForegroundColor Cyan
+
+$WinRarUrl = "https://www.win-rar.com/fileadmin/winrar-versions/winrar/winrar-x64-723.exe"
+$WinRarPath = Join-Path -Path $env:TEMP -ChildPath "winrar-x64-723.exe"
+
+try {
+    Write-Host "Tải xuống WinRAR từ: $WinRarUrl" -ForegroundColor Gray
+    Invoke-WebRequest -Uri $WinRarUrl -OutFile $WinRarPath -UseBasicParsing
+    Write-Host "Tải xuống WinRAR hoàn tất." -ForegroundColor Green
+    
+    Write-Host "Cài đặt WinRAR..." -ForegroundColor Gray
+    Start-Process -FilePath $WinRarPath -ArgumentList "/S" -Wait -Verb RunAs
+    Write-Host "Cài đặt WinRAR hoàn tất." -ForegroundColor Green
+    
+    Remove-Item -Path $WinRarPath -Force
+} catch {
+    Write-Warning "Lỗi khi tải hoặc cài đặt WinRAR: $_"
+}
+
+# --- Tải và cài đặt DirectX Jun2010 ---
+Write-Host "Bước 2: Tải và cài đặt DirectX Jun2010..." -ForegroundColor Cyan
+
+$DirectXUrl = "https://download.microsoft.com/download/8/4/a/84a35bf1-dafe-4ae8-82af-ad2ae20b6b14/directx_Jun2010_redist.exe"
+$DirectXPath = Join-Path -Path $env:TEMP -ChildPath "directx_Jun2010_redist.exe"
+$DX11Dir = Join-Path -Path $env:TEMP -ChildPath "DX11"
+
+try {
+    # Tạo thư mục DX11
+    New-Item -ItemType Directory -Path $DX11Dir -Force
+    
+    Write-Host "Tải xuống DirectX Jun2010 từ: $DirectXUrl" -ForegroundColor Gray
+    Invoke-WebRequest -Uri $DirectXUrl -OutFile $DirectXPath -UseBasicParsing
+    Write-Host "Tải xuống DirectX Jun2010 hoàn tất." -ForegroundColor Green
+    
+    Write-Host "Sao chép file DirectX vào thư mục DX11..." -ForegroundColor Gray
+    Copy-Item -Path $DirectXPath -Destination $DX11Dir -Force
+    
+    # Di chuyển đến thư mục DX11 và chạy DXsetup
+    Set-Location -Path $DX11Dir
+    Write-Host "Chạy DXsetup từ thư mục DX11..." -ForegroundColor Gray
+    Start-Process -FilePath "DXsetup.exe" -ArgumentList "/silent" -Wait -Verb RunAs
+    Write-Host "Cài đặt DirectX Jun2010 hoàn tất." -ForegroundColor Green
+    
+    Set-Location -Path $env:TEMP
+    Remove-Item -Path $DirectXPath -Force
+} catch {
+    Write-Warning "Lỗi khi tải hoặc cài đặt DirectX Jun2010: $_"
+}
+
+# --- Tải và cài đặt Visual C++ Redistributable ---
+Write-Host "Bước 3: Tải và cài đặt Visual C++ Redistributable..." -ForegroundColor Cyan
+
+$VCRedistUrl = "https://aka.ms/vs/17/release/vc_redist.x64.exe"
+$VCRedistPath = Join-Path -Path $env:TEMP -ChildPath "vc_redist.x64.exe"
+
+try {
+    Write-Host "Tải xuống Visual C++ Redistributable từ: $VCRedistUrl" -ForegroundColor Gray
+    Invoke-WebRequest -Uri $VCRedistUrl -OutFile $VCRedistPath -UseBasicParsing
+    Write-Host "Tải xuống Visual C++ Redistributable hoàn tất." -ForegroundColor Green
+    
+    Write-Host "Cài đặt Visual C++ Redistributable..." -ForegroundColor Gray
+    Start-Process -FilePath $VCRedistPath -ArgumentList "/install", "/quiet", "/norestart" -Wait -Verb RunAs
+    Write-Host "Cài đặt Visual C++ Redistributable hoàn tất." -ForegroundColor Green
+    
+    Remove-Item -Path $VCRedistPath -Force
+} catch {
+    Write-Warning "Lỗi khi tải hoặc cài đặt Visual C++ Redistributable: $_"
+}
+
+# --- Tải và cài đặt StarDesk ---
+Write-Host "Bước 4: Tải và cài đặt StarDesk..." -ForegroundColor Cyan
+
+$StarDeskUrl = "https://dl.stardesk.net/StarDesk_Setup_1.4.3.9253_0814212715_official.exe?n=StarDesk_1.4.3.exe"
+$StarDeskPath = Join-Path -Path $env:TEMP -ChildPath "StarDesk_Setup.exe"
+
+try {
+    Write-Host "Tải xuống StarDesk từ: $StarDeskUrl" -ForegroundColor Gray
+    Invoke-WebRequest -Uri $StarDeskUrl -OutFile $StarDeskPath -UseBasicParsing
+    Write-Host "Tải xuống StarDesk hoàn tất." -ForegroundColor Green
+    
+    Write-Host "Cài đặt StarDesk..." -ForegroundColor Gray
+    Start-Process -FilePath $StarDeskPath -ArgumentList "/S" -Wait -Verb RunAs
+    Write-Host "Cài đặt StarDesk hoàn tất." -ForegroundColor Green
+    
+    Remove-Item -Path $StarDeskPath -Force
+} catch {
+    Write-Warning "Lỗi khi tải hoặc cài đặt StarDesk: $_"
+}
+
+# --- Tải và đặt wallpaper ngẫu nhiên ---
+Write-Host "Bước 5: Tải và đặt wallpaper ngẫu nhiên..." -ForegroundColor Cyan
+
+$WallpaperUrls = @(
+    "https://raw.githubusercontent.com/zenixbot0101/Moonlight-Web-2.0/main/roblox-wallpaper.jpg",
+    "https://raw.githubusercontent.com/zenixbot0101/Moonlight-Web-2.0/main/roblox-wallpaper.jpg",
+    "https://raw.githubusercontent.com/zenixbot0101/Moonlight-Web-2.0/main/wallpaper11.jpg",
+    "https://raw.githubusercontent.com/zenixbot0101/Moonlight-Web-2.0/main/wall1.png",
+    "https://raw.githubusercontent.com/zenixbot0101/Moonlight-Web-2.0/main/wall2.png"
+)
+
+try {
+    # Chọn ngẫu nhiên một URL từ danh sách
+    $randomIndex = Get-Random -Minimum 0 -Maximum $WallpaperUrls.Count
+    $selectedUrl = $WallpaperUrls[$randomIndex]
+    
+    Write-Host "Đang chọn wallpaper ngẫu nhiên: $selectedUrl" -ForegroundColor Gray
+    
+    # Tải xuống wallpaper
+    $wallpaperPath = Join-Path -Path $env:TEMP -ChildPath "wallpaper.jpg"
+    Invoke-WebRequest -Uri $selectedUrl -OutFile $wallpaperPath -UseBasicParsing
+    Write-Host "Tải xuống wallpaper hoàn tất." -ForegroundColor Green
+    
+    # Đặt wallpaper
+    Add-Type -AssemblyName System.Windows.Forms
+    [System.Windows.Forms.SystemInformation]::VirtualScreen
+    $shell = New-Object -ComObject WScript.Shell
+    $shortcut = $shell.CreateShortcut("$env:APPDATA\Microsoft\Windows\Start Menu\Programs\Startup\wallpaper.lnk")
+    $shortcut.TargetPath = "rundll32.exe"
+    $shortcut.Arguments = "user32.dll,UpdatePerUserSystemParameters"
+    $shortcut.Save()
+    
+    # Sử dụng registry để đặt wallpaper
+    $regPath = "HKCU:\Control Panel\Desktop"
+    Set-ItemProperty -Path $regPath -Name Wallpaper -Value $wallpaperPath
+    Set-ItemProperty -Path $regPath -Name WallpaperStyle -Value 2  # 2 = Stretch
+    Set-ItemProperty -Path $regPath -Name TileWallpaper -Value 0  # 0 = Don't tile
+    
+    # Cập nhật màn hình nền
+    Add-Type -AssemblyName System.Windows.Forms
+    [System.Windows.Forms.SystemInformation]::VirtualScreen
+    [System.Windows.Forms.Application]::SetCompatibleTextRenderingDefault($false)
+    
+    # Sử dụng API để cập nhật wallpaper
+    $sig = @"
+[DllImport("user32.dll", SetLastError = true)]
+public static extern int SystemParametersInfo(int uAction, int uParam, string lpvParam, int fuWinIni);
+"@
+    
+    $SPI_SETDESKWALLPAPER = 20
+    $SPIF_UPDATEINIFILE = 0x01
+    $SPIF_SENDCHANGE = 0x02
+    
+    $setWallpaper = Add-Type -MemberDefinition $sig -Name "Win32" -Namespace "Win32" -PassThru
+    $setWallpaper::SystemParametersInfo($SPI_SETDESKWALLPAPER, 0, $wallpaperPath, ($SPIF_UPDATEINIFILE -bor $SPIF_SENDCHANGE))
+    
+    Write-Host "Đã đặt wallpaper thành công." -ForegroundColor Green
+    
+    # Xóa file tạm
+    Remove-Item -Path $wallpaperPath -Force
+} catch {
+    Write-Warning "Lỗi khi tải hoặc đặt wallpaper: $_"
+}
+
+# --- Tắt tất cả các cổng Windows ---
+Write-Host "Bước 6: Tắt tất cả các cổng Windows..." -ForegroundColor Cyan
+
+try {
+    Write-Host "Tắt tất cả các cổng Windows (firewall)..." -ForegroundColor Gray
+    netsh advfirewall set allprofiles state off
+    Write-Host "Đã tắt tất cả các cổng Windows." -ForegroundColor Green
+} catch {
+    Write-Warning "Lỗi khi tắt cổng Windows: $_"
+}
+
+# --- Tắt Windows Defender ---
+Write-Host "Bước 7: Tắt Windows Defender..." -ForegroundColor Cyan
+
+try {
+    Write-Host "Tắt Windows Defender..." -ForegroundColor Gray
+    # Tắt Windows Defender Service
+    Stop-Service -Name "Windows Defender Service" -Force -ErrorAction SilentlyContinue
+    Set-Service -Name "Windows Defender Service" -StartupType Disabled
+    
+    # Tắt Windows Defender Firewall
+    Set-NetFirewallProfile -Profile Domain,Private,Public -Enabled False
+    
+    # Tắt Windows Defender Real-time Protection
+    Set-MpPreference -DisableRealtimeMonitoring $true
+    
+    Write-Host "Đã tắt Windows Defender." -ForegroundColor Green
+} catch {
+    Write-Warning "Lỗi khi tắt Windows Defender: $_"
+}
+
+# --- Bước 8: Cài đặt NVIDIA Driver (còn lại từ script gốc) ---
+Write-Host "Bước 8: Cài đặt NVIDIA Driver..." -ForegroundColor Cyan
+
+# Các phần còn lại của script gốc
 $Drivers = @{
     "Normal" = @{
         "Filename" = "582.53_grid_win10_win11_server2022_server_2025_dch_64bit_international.exe"
@@ -307,9 +480,9 @@ catch {
     Write-Warning "Đã xảy ra lỗi khi cấu hình dịch vụ âm thanh: $_"
 }
 
-# --- Bước 7: Tải và cài đặt Apollo ---
+# --- Bước 9: Tải và cài đặt Apollo ---
 Write-Host ""
-Write-Host "Bước 7: Đang tải và cài đặt Apollo..." -ForegroundColor Cyan
+Write-Host "Bước 9: Đang tải và cài đặt Apollo..." -ForegroundColor Cyan
 
 try {
     # Tải file Apollo về thư mục tạm
@@ -346,6 +519,90 @@ catch {
     Write-Warning "Không thể tải hoặc cài đặt Apollo. Lỗi: $_"
 }
 
+# --- Bước 10: Tự động chạy Apollo sau khi cài đặt hoàn tất ---
+Write-Host ""
+Write-Host "Bước 10: Tự động chạy Apollo..." -ForegroundColor Cyan
+
+try {
+    # Kiểm tra xem Apollo đã được cài đặt chưa
+    $apolloPath = "C:\Program Files\Apollo\Apollo.exe"
+    if (Test-Path $apolloPath) {
+        Write-Host "Đang chạy Apollo..." -ForegroundColor Gray
+        Start-Process -FilePath $apolloPath -Verb RunAs
+        Write-Host "Đã chạy Apollo thành công." -ForegroundColor Green
+    } else {
+        Write-Warning "Không tìm thấy Apollo để chạy. Có thể Apollo chưa được cài đặt hoặc đường dẫn không đúng."
+    }
+}
+catch {
+    Write-Warning "Không thể chạy Apollo. Lỗi: $_"
+}
+
+# --- Kiểm tra hệ điều hành và chạy lệnh cho Windows Server 2025 ---
+Write-Host ""
+Write-Host "Bước 11: Kiểm tra hệ điều hành và chạy lệnh đặc biệt..." -ForegroundColor Cyan
+
+try {
+    # Lấy thông tin hệ điều hành
+    $osInfo = Get-ComputerInfo | Select-Object WindowsProductName, WindowsVersion
+    
+    Write-Host "Thông tin hệ điều hành: $($osInfo.WindowsProductName) - $($osInfo.WindowsVersion)" -ForegroundColor Gray
+    
+    # Kiểm tra nếu là Windows Server 2025
+    if ($osInfo.WindowsProductName -like "*Server 2025*") {
+        Write-Host "Đây là Windows Server 2025. Đang chạy các lệnh đặc biệt..." -ForegroundColor Green
+        
+        # Chạy các lệnh Add-AppxPackage cho Windows Server 2025
+        try {
+            Write-Host "Đang chạy lệnh Add-AppxPackage cho MicrosoftWindows.Client.CBS..." -ForegroundColor Gray
+            Add-AppxPackage -Register -Path "C:\Windows\SystemApps\MicrosoftWindows.Client.CBS_cw5n1h2txyewy\appxmanifest.xml" -DisableDevelopmentMode
+            Write-Host "Đã chạy lệnh MicrosoftWindows.Client.CBS thành công." -ForegroundColor Green
+        }
+        catch {
+            Write-Warning "Lỗi khi chạy lệnh MicrosoftWindows.Client.CBS: $_"
+        }
+        
+        try {
+            Write-Host "Đang chạy lệnh Add-AppxPackage cho Microsoft.UI.Xaml.CBS..." -ForegroundColor Gray
+            Add-AppxPackage -Register -Path "C:\Windows\SystemApps\Microsoft.UI.Xaml.CBS_8wekyb3d8bbwe\appxmanifest.xml" -DisableDevelopmentMode
+            Write-Host "Đã chạy lệnh Microsoft.UI.Xaml.CBS thành công." -ForegroundColor Green
+        }
+        catch {
+            Write-Warning "Lỗi khi chạy lệnh Microsoft.UI.Xaml.CBS: $_"
+        }
+        
+        try {
+            Write-Host "Đang chạy lệnh Add-AppxPackage cho MicrosoftWindows.Client.Core..." -ForegroundColor Gray
+            Add-AppxPackage -Register -Path "C:\Windows\SystemApps\MicrosoftWindows.Client.Core_cw5n1h2txyewy\appxmanifest.xml" -DisableDevelopmentMode
+            Write-Host "Đã chạy lệnh MicrosoftWindows.Client.Core thành công." -ForegroundColor Green
+        }
+        catch {
+            Write-Warning "Lỗi khi chạy lệnh MicrosoftWindows.Client.Core: $_"
+        }
+        
+        Write-Host "Tất cả các lệnh đặc biệt đã được thực hiện." -ForegroundColor Green
+    }
+    else {
+        Write-Host "Hệ điều hành không phải là Windows Server 2025. Bỏ qua các lệnh đặc biệt." -ForegroundColor Yellow
+    }
+}
+catch {
+    Write-Warning "Lỗi khi kiểm tra hệ điều hành hoặc chạy lệnh đặc biệt: $_"
+}
+
+# --- Kết thúc và khởi động lại ---
+Write-Host ""
+Write-Host "Bước 12: Khởi động lại hệ thống..." -ForegroundColor Cyan
+
+try {
+    Write-Host "Đang khởi động lại hệ thống sau 0 giây..." -ForegroundColor Gray
+    shutdown /r /t 0
+    Write-Host "Đã bắt đầu quá trình khởi động lại." -ForegroundColor Green
+}
+catch {
+    Write-Warning "Không thể khởi động lại hệ thống: $_"
+}
+
 Write-Host ""
 Write-Host "========================================" -ForegroundColor Green
 Write-Host "        CÀI ĐẶT HOÀN TẤT" -ForegroundColor Green
@@ -354,5 +611,12 @@ Write-Host ""
 Write-Host "✓ Driver NVIDIA đã được cài đặt" -ForegroundColor White
 Write-Host "✓ Dịch vụ âm thanh đã được cấu hình và khởi động" -ForegroundColor White
 Write-Host "✓ Apollo đã được cài đặt" -ForegroundColor White
+Write-Host "✓ WinRAR đã được cài đặt" -ForegroundColor White
+Write-Host "✓ DirectX Jun2010 đã được cài đặt" -ForegroundColor White
+Write-Host "✓ Visual C++ Redistributable đã được cài đặt" -ForegroundColor White
+Write-Host "✓ StarDesk đã được cài đặt" -ForegroundColor White
+Write-Host "✓ Wallpaper đã được đặt" -ForegroundColor White
+Write-Host "✓ Tất cả cổng Windows đã bị tắt" -ForegroundColor White
+Write-Host "✓ Windows Defender đã bị tắt" -ForegroundColor White
 Write-Host ""
 Write-Host "========================================" -ForegroundColor Green
