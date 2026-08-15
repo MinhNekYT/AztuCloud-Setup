@@ -54,14 +54,24 @@ $form.Add_FormClosing({
 ''')
 
 ps1_path = r"C:\keepalive.ps1"
-with open(ps1_path, "w", encoding="utf-8") as f:
-    f.write(ps1_code)
-print(f"[+] Đã tạo {ps1_path}")
+created = False
+try:
+    with open(ps1_path, "w", encoding="utf-8") as f:
+        f.write(ps1_code)
+    print(f"[+] Đã tạo {ps1_path}")
+    created = True
+except OSError as e:
+    print(f"[-] Không thể tạo {ps1_path}: {e}")
 
-subprocess.Popen(
-    ["powershell", "-ExecutionPolicy", "Bypass", "-File", ps1_path],
-    creationflags=subprocess.CREATE_NO_WINDOW
-)
+if created:
+    creation_flags = 0
+    if os.name == "nt":
+        creation_flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+
+    subprocess.Popen(
+        ["powershell", "-ExecutionPolicy", "Bypass", "-File", ps1_path],
+        creationflags=creation_flags
+    )
 
 start_time = time.time()
 while True:

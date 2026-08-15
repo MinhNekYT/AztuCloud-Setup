@@ -1,4 +1,4 @@
-#===============================================
+﻿#===============================================
 # Script Cài Đặt NVIDIA Driver & Các Thành Phần Khác
 #===============================================
 $ErrorActionPreference = "Stop"
@@ -69,7 +69,8 @@ try {
     # Di chuyển đến thư mục DX11 và chạy DXsetup
     Set-Location -Path $DX11Dir
     Write-Host "Chạy DXsetup từ thư mục DX11..." -ForegroundColor Gray
-    Start-Process -FilePath "DXsetup.exe" -ArgumentList "/silent" -Wait -Verb RunAs
+    $dxSetupPath = Join-Path -Path $DX11Dir -ChildPath "DXsetup.exe"
+    Start-Process -FilePath $dxSetupPath -ArgumentList "/silent" -Wait
     Write-Host "Cài đặt DirectX Jun2010 hoàn tất." -ForegroundColor Green
     
     Set-Location -Path $env:TEMP
@@ -98,57 +99,18 @@ try {
     Write-Warning "Lỗi khi tải hoặc cài đặt Visual C++ Redistributable: $_"
 }
 
-# --- Tải và cài đặt StarDesk ---
-Write-Host "Bước 4: Tải và cài đặt StarDesk..." -ForegroundColor Cyan
+# --- Tải và đặt wallpaper cố định ---
+Write-Host "Bước 4: Tải và đặt wallpaper..." -ForegroundColor Cyan
 
-$StarDeskUrl = "https://dl.stardesk.net/StarDesk_Setup_1.4.3.9253_0814212715_official.exe?n=StarDesk_1.4.3.exe"
-$StarDeskPath = Join-Path -Path $env:TEMP -ChildPath "StarDesk_Setup.exe"
-
-try {
-    Write-Host "Tải xuống StarDesk từ: $StarDeskUrl" -ForegroundColor Gray
-    Invoke-WebRequest -Uri $StarDeskUrl -OutFile $StarDeskPath -UseBasicParsing
-    Write-Host "Tải xuống StarDesk hoàn tất." -ForegroundColor Green
-    
-    Write-Host "Cài đặt StarDesk..." -ForegroundColor Gray
-    Start-Process -FilePath $StarDeskPath -ArgumentList "/S" -Wait -Verb RunAs
-    Write-Host "Cài đặt StarDesk hoàn tất." -ForegroundColor Green
-    
-    Remove-Item -Path $StarDeskPath -Force
-} catch {
-    Write-Warning "Lỗi khi tải hoặc cài đặt StarDesk: $_"
-}
-
-# --- Tải và đặt wallpaper ngẫu nhiên ---
-Write-Host "Bước 5: Tải và đặt wallpaper ngẫu nhiên..." -ForegroundColor Cyan
-
-$WallpaperUrls = @(
-    "https://raw.githubusercontent.com/zenixbot0101/Moonlight-Web-2.0/main/roblox-wallpaper.jpg",
-    "https://raw.githubusercontent.com/zenixbot0101/Moonlight-Web-2.0/main/roblox-wallpaper.jpg",
-    "https://raw.githubusercontent.com/zenixbot0101/Moonlight-Web-2.0/main/wallpaper11.jpg",
-    "https://raw.githubusercontent.com/zenixbot0101/Moonlight-Web-2.0/main/wall1.png",
-    "https://raw.githubusercontent.com/zenixbot0101/Moonlight-Web-2.0/main/wall2.png"
-)
+$WallpaperUrl = "https://github.com/MinhNekYT/AztuCloud-Setup/releases/download/wallpaper/wallpaper.jpg"
+$wallpaperPath = "C:\wallpaper.jpg"
 
 try {
-    # Chọn ngẫu nhiên một URL từ danh sách
-    $randomIndex = Get-Random -Minimum 0 -Maximum $WallpaperUrls.Count
-    $selectedUrl = $WallpaperUrls[$randomIndex]
-    
-    Write-Host "Đang chọn wallpaper ngẫu nhiên: $selectedUrl" -ForegroundColor Gray
+    Write-Host "Đang tải wallpaper: $WallpaperUrl" -ForegroundColor Gray
     
     # Tải xuống wallpaper
-    $wallpaperPath = Join-Path -Path $env:TEMP -ChildPath "wallpaper.jpg"
-    Invoke-WebRequest -Uri $selectedUrl -OutFile $wallpaperPath -UseBasicParsing
+    Invoke-WebRequest -Uri $WallpaperUrl -OutFile $wallpaperPath -UseBasicParsing
     Write-Host "Tải xuống wallpaper hoàn tất." -ForegroundColor Green
-    
-    # Đặt wallpaper
-    Add-Type -AssemblyName System.Windows.Forms
-    [System.Windows.Forms.SystemInformation]::VirtualScreen
-    $shell = New-Object -ComObject WScript.Shell
-    $shortcut = $shell.CreateShortcut("$env:APPDATA\Microsoft\Windows\Start Menu\Programs\Startup\wallpaper.lnk")
-    $shortcut.TargetPath = "rundll32.exe"
-    $shortcut.Arguments = "user32.dll,UpdatePerUserSystemParameters"
-    $shortcut.Save()
     
     # Sử dụng registry để đặt wallpaper
     $regPath = "HKCU:\Control Panel\Desktop"
@@ -156,12 +118,7 @@ try {
     Set-ItemProperty -Path $regPath -Name WallpaperStyle -Value 2  # 2 = Stretch
     Set-ItemProperty -Path $regPath -Name TileWallpaper -Value 0  # 0 = Don't tile
     
-    # Cập nhật màn hình nền
-    Add-Type -AssemblyName System.Windows.Forms
-    [System.Windows.Forms.SystemInformation]::VirtualScreen
-    [System.Windows.Forms.Application]::SetCompatibleTextRenderingDefault($false)
-    
-    # Sử dụng API để cập nhật wallpaper
+    # Sử dụng API để cập nhật wallpaper ngay lập tức
     $sig = @"
 [DllImport("user32.dll", SetLastError = true)]
 public static extern int SystemParametersInfo(int uAction, int uParam, string lpvParam, int fuWinIni);
@@ -175,15 +132,12 @@ public static extern int SystemParametersInfo(int uAction, int uParam, string lp
     $setWallpaper::SystemParametersInfo($SPI_SETDESKWALLPAPER, 0, $wallpaperPath, ($SPIF_UPDATEINIFILE -bor $SPIF_SENDCHANGE))
     
     Write-Host "Đã đặt wallpaper thành công." -ForegroundColor Green
-    
-    # Xóa file tạm
-    Remove-Item -Path $wallpaperPath -Force
 } catch {
     Write-Warning "Lỗi khi tải hoặc đặt wallpaper: $_"
 }
 
 # --- Tắt tất cả các cổng Windows ---
-Write-Host "Bước 6: Tắt tất cả các cổng Windows..." -ForegroundColor Cyan
+Write-Host "Bước 5: Tắt tất cả các cổng Windows..." -ForegroundColor Cyan
 
 try {
     Write-Host "Tắt tất cả các cổng Windows (firewall)..." -ForegroundColor Gray
@@ -194,7 +148,7 @@ try {
 }
 
 # --- Tắt Windows Defender ---
-Write-Host "Bước 7: Tắt Windows Defender..." -ForegroundColor Cyan
+Write-Host "Bước 6: Tắt Windows Defender..." -ForegroundColor Cyan
 
 try {
     Write-Host "Tắt Windows Defender..." -ForegroundColor Gray
@@ -213,8 +167,8 @@ try {
     Write-Warning "Lỗi khi tắt Windows Defender: $_"
 }
 
-# --- Bước 8: Cài đặt NVIDIA Driver (còn lại từ script gốc) ---
-Write-Host "Bước 8: Cài đặt NVIDIA Driver..." -ForegroundColor Cyan
+# --- Bước 7: Cài đặt NVIDIA Driver ---
+Write-Host "Bước 7: Cài đặt NVIDIA Driver..." -ForegroundColor Cyan
 
 # Các phần còn lại của script gốc
 $Drivers = @{
@@ -344,98 +298,104 @@ $DriverUrl = "https://storage.googleapis.com/compute-gpu-installation-$MultiRegi
 # --- Bước 1: Kiểm tra sự hiện diện của GPU ---
 Write-Host "Bước 1: Đang kiểm tra GPU NVIDIA (Kiểm tra PCI ID)..." -ForegroundColor Cyan
 
+$skipDriverInstall = $false
 $gpuId = Find-GPU
 
 if ([string]::IsNullOrWhiteSpace($gpuId)) {
-    Write-Warning "Không phát hiện GPU NVIDIA (VEN_10DE) qua kiểm tra PnP Entity. Đang thoát."
-    Exit
+    Write-Warning "Không phát hiện GPU NVIDIA (VEN_10DE) qua kiểm tra PnP Entity. Bỏ qua cài đặt driver."
+    $skipDriverInstall = $true
 } else {
     Write-Host "Đã phát hiện GPU với chuỗi Device ID: $gpuId" -ForegroundColor Green
 }
 
-# --- Bước 2: Kiểm tra nvidia-smi ---
-Write-Host "Bước 2: Đang kiểm tra cài đặt hiện có (nvidia-smi)..." -ForegroundColor Cyan
+if (-not $skipDriverInstall) {
+    # --- Bước 2: Kiểm tra nvidia-smi ---
+    Write-Host "Bước 2: Đang kiểm tra cài đặt hiện có (nvidia-smi)..." -ForegroundColor Cyan
 
-$smiCommand = Get-Command "nvidia-smi" -ErrorAction SilentlyContinue
-$smiPathDefault = "C:\Program Files\NVIDIA Corporation\NVSMI\nvidia-smi.exe"
-$smiPathSystem = "C:\Windows\System32\nvidia-smi.exe"
+    $smiCommand = Get-Command "nvidia-smi" -ErrorAction SilentlyContinue
+    $smiPathDefault = "C:\Program Files\NVIDIA Corporation\NVSMI\nvidia-smi.exe"
+    $smiPathSystem = "C:\Windows\System32\nvidia-smi.exe"
 
-if ($smiCommand -or (Test-Path $smiPathDefault) -or (Test-Path $smiPathSystem)) {
-    Write-Warning "nvidia-smi đã tồn tại. Driver dường như đã được cài đặt. Đang thoát."
-    Exit
-} else {
-    Write-Host "Không tìm thấy nvidia-smi. Tiến hành cài đặt." -ForegroundColor Green
+    if ($smiCommand -or (Test-Path $smiPathDefault) -or (Test-Path $smiPathSystem)) {
+        Write-Warning "nvidia-smi đã tồn tại. Driver dường như đã được cài đặt. Bỏ qua cài đặt driver."
+        $skipDriverInstall = $true
+    } else {
+        Write-Host "Không tìm thấy nvidia-smi. Tiến hành cài đặt." -ForegroundColor Green
+    }
 }
 
-# --- Bước 3: Tải xuống trình cài đặt ---
-Write-Host "Bước 3: Đang tải xuống driver..." -ForegroundColor Cyan
-Write-Host "Nguồn: $DriverUrl" -ForegroundColor Gray
+if (-not $skipDriverInstall) {
+    # --- Bước 3: Tải xuống trình cài đặt ---
+    Write-Host "Bước 3: Đang tải xuống driver..." -ForegroundColor Cyan
+    Write-Host "Nguồn: $DriverUrl" -ForegroundColor Gray
 
-# Đảm bảo TLS 1.2 được bật để tải xuống
-[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+    # Đảm bảo TLS 1.2 được bật để tải xuống
+    [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
-try {
-    # SỬA LỖI HIỆU SUẤT QUAN TRỌNG:
-    # Thanh tiến trình của Invoke-WebRequest làm chậm đáng kể quá trình tải xuống trong Windows PowerShell 5.1.
-    # Chúng tôi tạm thời vô hiệu hóa nó để tăng tốc quá trình truyền.
-    $OriginalProgressPreference = $ProgressPreference
-    $ProgressPreference = 'SilentlyContinue'
+    try {
+        # SỬA LỖI HIỆU SUẤT QUAN TRỌNG:
+        # Thanh tiến trình của Invoke-WebRequest làm chậm đáng kể quá trình tải xuống trong Windows PowerShell 5.1.
+        # Chúng tôi tạm thời vô hiệu hóa nó để tăng tốc quá trình truyền.
+        $OriginalProgressPreference = $ProgressPreference
+        $ProgressPreference = 'SilentlyContinue'
 
-    Invoke-WebRequest -Uri $DriverUrl -OutFile $InstallerPath -UseBasicParsing
+        Invoke-WebRequest -Uri $DriverUrl -OutFile $InstallerPath -UseBasicParsing
 
-    # Khôi phục tùy chọn
-    $ProgressPreference = $OriginalProgressPreference
+        # Khôi phục tùy chọn
+        $ProgressPreference = $OriginalProgressPreference
 
-    Write-Host "Tải xuống hoàn tất. Đã lưu tại: $InstallerPath" -ForegroundColor Green
+        Write-Host "Tải xuống hoàn tất. Đã lưu tại: $InstallerPath" -ForegroundColor Green
 
-    # --- Bước 3.1: Xác minh Checksum ---
-    if (-not [string]::IsNullOrWhiteSpace($ExpectedSha256)) {
-        Write-Host "Đang xác minh checksum SHA256..." -ForegroundColor Cyan
-        $ComputedHash = (Get-FileHash -Path $InstallerPath -Algorithm SHA256).Hash
+        # --- Bước 3.1: Xác minh Checksum ---
+        if (-not [string]::IsNullOrWhiteSpace($ExpectedSha256)) {
+            Write-Host "Đang xác minh checksum SHA256..." -ForegroundColor Cyan
+            $ComputedHash = (Get-FileHash -Path $InstallerPath -Algorithm SHA256).Hash
 
-        if ($ComputedHash -eq $ExpectedSha256) {
-            Write-Host "Checksum đã được xác minh." -ForegroundColor Green
-        } else {
-            # Xóa ngay tệp bị lỗi
-            Remove-Item -Path $InstallerPath -Force
-            Write-Error "Checksum không khớp! Dự kiến: $ExpectedSha256, Tính toán: $ComputedHash"
-            Exit
+            if ($ComputedHash -eq $ExpectedSha256) {
+                Write-Host "Checksum đã được xác minh." -ForegroundColor Green
+            } else {
+                # Xóa ngay tệp bị lỗi
+                Remove-Item -Path $InstallerPath -Force
+                Write-Warning "Checksum không khớp! Bỏ qua cài đặt driver."
+                $skipDriverInstall = $true
+            }
         }
     }
-}
-catch {
-    Write-Error "Không thể tải xuống hoặc xác minh trình cài đặt. Lỗi: $_"
-    Exit
-}
-
-# --- Bước 4 và 5: Thực thi và chờ ---
-Write-Host "Bước 4: Đang thực thi trình cài đặt..." -ForegroundColor Cyan
-Write-Host "Cờ sử dụng: /s /n (Âm thầm, Không khởi động lại)" -ForegroundColor Gray
-
-try {
-    # Khởi động tiến trình với /s (âm thầm) và /n (không khởi động lại)
-    $process = Start-Process -FilePath $InstallerPath -ArgumentList "/s", "/n" -PassThru -Wait -Verb RunAs
-
-    if ($process.ExitCode -eq 0) {
-        Write-Host "Cài đặt hoàn tất thành công." -ForegroundColor Green
-    } else {
-        Write-Warning "Cài đặt hoàn tất với mã thoát: $($process.ExitCode). Điều này có thể cho thấy cần khởi động lại hoặc cảnh báo không nghiêm trọng."
+    catch {
+        Write-Warning "Không thể tải xuống hoặc xác minh trình cài đặt. Bỏ qua cài đặt driver. Lỗi: $_"
+        $skipDriverInstall = $true
     }
 }
-catch {
-    Write-Error "Không thể thực thi trình cài đặt. Lỗi: $_"
-    Exit
+
+if (-not $skipDriverInstall) {
+    # --- Bước 4 và 5: Thực thi và chờ ---
+    Write-Host "Bước 4: Đang thực thi trình cài đặt..." -ForegroundColor Cyan
+    Write-Host "Cờ sử dụng: /s /n (Âm thầm, Không khởi động lại)" -ForegroundColor Gray
+
+    try {
+        # Khởi động tiến trình với /s (âm thầm) và /n (không khởi động lại)
+        $process = Start-Process -FilePath $InstallerPath -ArgumentList "/s", "/n" -PassThru -Wait -Verb RunAs
+
+        if ($process.ExitCode -eq 0) {
+            Write-Host "Cài đặt hoàn tất thành công." -ForegroundColor Green
+        } else {
+            Write-Warning "Cài đặt hoàn tất với mã thoát: $($process.ExitCode). Điều này có thể cho thấy cần khởi động lại hoặc cảnh báo không nghiêm trọng."
+        }
+    }
+    catch {
+        Write-Warning "Không thể thực thi trình cài đặt. Bỏ qua. Lỗi: $_"
+    }
+
+    # --- Dọn dẹp ---
+    Write-Host "Đang dọn dẹp các tệp tạm thời..." -ForegroundColor Cyan
+    if (Test-Path $InstallerPath) {
+        Remove-Item -Path $InstallerPath -Force
+    }
 }
 
-# --- Dọn dẹp ---
-Write-Host "Đang dọn dẹp các tệp tạm thời..." -ForegroundColor Cyan
-if (Test-Path $InstallerPath) {
-    Remove-Item -Path $InstallerPath -Force
-}
-
-# --- Bước 6: Cấu hình và khởi động dịch vụ âm thanh ---
+# --- Bước 8: Cấu hình và khởi động dịch vụ âm thanh ---
 Write-Host ""
-Write-Host "Bước 6: Đang cấu hình và khởi động dịch vụ âm thanh..." -ForegroundColor Cyan
+Write-Host "Bước 8: Đang cấu hình và khởi động dịch vụ âm thanh..." -ForegroundColor Cyan
 
 try {
     # Cấu hình dịch vụ Audiosrv
@@ -538,7 +498,7 @@ catch {
     Write-Warning "Không thể chạy Apollo. Lỗi: $_"
 }
 
-# --- Kiểm tra hệ điều hành và chạy lệnh cho Windows Server 2025 ---
+# --- Kiểm tra hệ điều hành và chạy lệnh đặc biệt cho Windows Server 2025, 2022, 2019, Windows 11, 10 ---
 Write-Host ""
 Write-Host "Bước 11: Kiểm tra hệ điều hành và chạy lệnh đặc biệt..." -ForegroundColor Cyan
 
@@ -548,9 +508,9 @@ try {
     
     Write-Host "Thông tin hệ điều hành: $($osInfo.WindowsProductName) - $($osInfo.WindowsVersion)" -ForegroundColor Gray
     
-    # Kiểm tra nếu là Windows Server 2025
-    if ($osInfo.WindowsProductName -like "*Server 2025*") {
-        Write-Host "Đây là Windows Server 2025. Đang chạy các lệnh đặc biệt..." -ForegroundColor Green
+    # Kiểm tra nếu là Windows Server 2025, 2022, 2019, Windows 11 hoặc Windows 10
+    if ($osInfo.WindowsProductName -match "Server 2025|Server 2022|Server 2019|Windows 11|Windows 10") {
+        Write-Host "Hệ điều hành được hỗ trợ. Đang chạy các lệnh đặc biệt..." -ForegroundColor Green
         
         # Chạy các lệnh Add-AppxPackage cho Windows Server 2025
         try {
@@ -583,24 +543,47 @@ try {
         Write-Host "Tất cả các lệnh đặc biệt đã được thực hiện." -ForegroundColor Green
     }
     else {
-        Write-Host "Hệ điều hành không phải là Windows Server 2025. Bỏ qua các lệnh đặc biệt." -ForegroundColor Yellow
+        Write-Host "Hệ điều hành không được hỗ trợ trong danh sách. Bỏ qua các lệnh đặc biệt." -ForegroundColor Yellow
     }
 }
 catch {
     Write-Warning "Lỗi khi kiểm tra hệ điều hành hoặc chạy lệnh đặc biệt: $_"
 }
 
-# --- Kết thúc và khởi động lại ---
+# --- Bước 12: Khởi động lại tiến trình sihost ---
 Write-Host ""
-Write-Host "Bước 12: Khởi động lại hệ thống..." -ForegroundColor Cyan
+Write-Host "Bước 12: Đang khởi động lại tiến trình sihost..." -ForegroundColor Cyan
 
 try {
-    Write-Host "Đang khởi động lại hệ thống sau 0 giây..." -ForegroundColor Gray
-    shutdown /r /t 0
-    Write-Host "Đã bắt đầu quá trình khởi động lại." -ForegroundColor Green
+    Stop-Process -Name sihost -Force
+    Write-Host "Đã khởi động lại sihost." -ForegroundColor Green
 }
 catch {
-    Write-Warning "Không thể khởi động lại hệ thống: $_"
+    Write-Warning "Không thể khởi động lại sihost: $_"
+}
+
+# --- Kết thúc: Khởi động AFK MODE (antiafk.py) ---
+Write-Host ""
+Write-Host "Bước 13: Khởi động AFK MODE (antiafk.py)..." -ForegroundColor Cyan
+
+try {
+    if (Test-Path "C:\antiafk.py") {
+        Write-Host "Đang khởi động antiafk.py..." -ForegroundColor Gray
+        if (Get-Command python -ErrorAction SilentlyContinue) {
+            Start-Process -FilePath "python" -ArgumentList "C:\antiafk.py"
+            Write-Host "Đã khởi động antiafk.py thành công." -ForegroundColor Green
+        } elseif (Get-Command py -ErrorAction SilentlyContinue) {
+            Start-Process -FilePath "py" -ArgumentList "-3", "C:\antiafk.py"
+            Write-Host "Đã khởi động antiafk.py thành công." -ForegroundColor Green
+        } else {
+            Write-Warning "Không tìm thấy Python. Hãy cài Python rồi chạy: python C:\antiafk.py"
+        }
+    } else {
+        Write-Warning "Không tìm thấy C:\antiafk.py. Không thể khởi động AFK MODE."
+    }
+}
+catch {
+    Write-Warning "Không thể khởi động antiafk.py: $_"
 }
 
 Write-Host ""
@@ -614,9 +597,9 @@ Write-Host "✓ Apollo đã được cài đặt" -ForegroundColor White
 Write-Host "✓ WinRAR đã được cài đặt" -ForegroundColor White
 Write-Host "✓ DirectX Jun2010 đã được cài đặt" -ForegroundColor White
 Write-Host "✓ Visual C++ Redistributable đã được cài đặt" -ForegroundColor White
-Write-Host "✓ StarDesk đã được cài đặt" -ForegroundColor White
 Write-Host "✓ Wallpaper đã được đặt" -ForegroundColor White
 Write-Host "✓ Tất cả cổng Windows đã bị tắt" -ForegroundColor White
 Write-Host "✓ Windows Defender đã bị tắt" -ForegroundColor White
+Write-Host "✓ AFK MODE đã được khởi động" -ForegroundColor White
 Write-Host ""
 Write-Host "========================================" -ForegroundColor Green
